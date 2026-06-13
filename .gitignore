@@ -231,3 +231,5 @@ ts_harness/node_modules/
 ts_harness/impl.ts
 ts_harness/gen.test.ts
 ts_harness/demo.test.ts
+
+node_modules/
