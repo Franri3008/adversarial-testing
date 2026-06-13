@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1840" height="760" viewBox="0 0 1840 760" role="img" aria-labelledby="title desc">
+  <title id="title">Core nested loops in adversarial-testing</title>
+  <desc id="desc">A code-like nested loop diagram naming the actual functions and stop conditions used by main.py, repair_main.py, orchestrate.py, and the runner modules.</desc>
+  <rect width="1840" height="760" fill="#f7f7f2"/>
+  <rect x="54" y="44" width="1732" height="646" rx="18" fill="#ffffff" stroke="#e8e5da"/>
+
+  <text x="88" y="92" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="28" font-weight="700" fill="#2f3437">core loops</text>
+  <text x="88" y="124" font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#7a7d78">actual control flow: repo scan -&gt; harden_target, or repair_main.run_repair -&gt; _harden</text>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="27" font-weight="600">
+    <text x="112" y="184" fill="#8071d8">for</text>
+    <text x="184" y="184" fill="#373b3f">rel, t in discover_targets(repo):</text>
+    <text x="244" y="254" fill="#c35b86">for</text>
+    <text x="316" y="254" fill="#373b3f">iteration in range(MAX_ITERATIONS):</text>
+    <text x="376" y="324" fill="#45a27f">role = ROLE_ORDER[role_idx]</text>
+    <text x="376" y="364" fill="#45a27f">gen = generate_test(src, surviving, role)</text>
+    <text x="510" y="434" fill="#d77845">result = run_and_check(...)</text>
+    <text x="510" y="474" fill="#373b3f">surviving -= killed_mutant_ids</text>
+    <text x="510" y="514" fill="#373b3f">if is_plateau(kill_rates): role_idx += 1</text>
+    <text x="510" y="554" fill="#373b3f">if not surviving: adversary.generate_surviving_mutants(...)</text>
+  </g>
+
+  <g stroke-linecap="round" stroke-width="5">
+    <line x1="88" y1="206" x2="88" y2="584" stroke="#8071d8"/>
+    <line x1="216" y1="276" x2="216" y2="584" stroke="#c35b86"/>
+    <line x1="348" y1="346" x2="348" y2="584" stroke="#45a27f"/>
+    <line x1="480" y1="416" x2="480" y2="584" stroke="#d77845"/>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="23" font-weight="600" fill="#34383b">
+    <text x="1340" y="184">loop 4 . discover_targets()</text>
+    <text x="1340" y="254">loop 3 . MAX_ITERATIONS</text>
+    <text x="1340" y="344">loop 2 . ROLE_ORDER</text>
+    <text x="1340" y="434">loop 1 . run_and_check()</text>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace" font-size="17" fill="#7d817c">
+    <text x="88" y="724">repair path: repair_main.run_repair = find_bug -&gt; generate_bug_test -&gt; generate_fix -&gt; _verify_fix -&gt; _harden; same runner gate decides truth</text>
+  </g>
+</svg>

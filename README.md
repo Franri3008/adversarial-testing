@@ -1,117 +1,46 @@
 # adversarial-testing
 
-A self-improving **mutation-testing loop**: an LLM writes tests (pytest or vitest) that try
-to *kill* deliberately-buggy variants ("mutants") of a reference implementation. The loop
-keeps generating tests against the mutants still alive, escalating from a cheap model to
-a strong one when progress stalls, and stops when every mutant is killed or a budget cap
-is hit.
+An adversarial test-generation loop for real code. The model proposes tests, but the
+score comes from the runner: a mutant is killed only when the generated test passes on
+the reference implementation and fails on the broken implementation. No LLM judges the
+result.
 
-The signal that drives the loop is **ground truth, not opinion**: a mutant is "killed"
-only when the generated test *passes* on the correct reference and *fails* on the mutant.
-The test runner (pytest or vitest) decides — no LLM judges the result.
+The repo contains two loops built on that same contract:
 
-> **Two loops live in this repo.** The **mutation loop** above (`main.py`) hardens a test
-> suite against planted mutants. A second **find-and-fix loop** (`repair_main.py`) reuses
-> the same runner/LLM contracts to *repair real bugs* — find a defect, write a failing
-> test, fix the code, then mutation-test the new test to prove it bites. See
-> [Find-and-fix mode](#find-and-fix-mode-repair_mainpy). To run both as one pipeline
-> (repair → harden) on a single target, use [`orchestrate.py`](#orchestrated-run-orchestratepy).
+- `main.py` hardens a test suite against generated or fixture mutants.
+- `repair_main.py` finds a real bug, writes a failing test, fixes the code, then
+  mutation-tests the new regression test.
+- `orchestrate.py` composes them as repair → harden on one target.
 
 ## How it works
 
-```mermaid
-flowchart TD
-    START(["Target: buggy code + oracle + planted bugs"])
-    START --> P1
+<p align="center">
+  <img src="docs/core-loops.svg" alt="Nested visualization of the core adversarial repair and hardening loops" width="900">
+</p>
 
-    subgraph P1["Phase 1 — Repair loop (repair_main.run_repair)"]
-        direction TB
-        F["find_bug(observation)<br/>strategy.py → has_bug, bug"]
-        T["generate_bug_test<br/>repair_generator.py (strategy tier)"]
-        X["generate_fix<br/>fixer.py"]
-        V{"_verify_fix AND _suite_passes<br/>test bites · no regression"}
-        H["_harden<br/>generate_test → run_and_check until mutants die"]
-        F --> T --> X --> V
-        V -->|"no · retry ≤ RETRY_PER_BUG"| T
-        V -->|"yes"| H --> F
-    end
+The mutation path is concrete:
 
-    P1 -->|"repaired code + test suite"| P2
+1. `discover_targets(repo)` finds self-contained Python/TypeScript functions.
+2. `acquire.generate_mutants` builds compile-checked mutants for a target.
+3. `harden_target` loops up to `MAX_ITERATIONS`.
+4. `ROLE_ORDER = ["bulk", "strategy"]` starts cheap and escalates on plateau.
+5. `generate_test(src, surviving, role)` proposes one test.
+6. `run_and_check(test, src, surviving)` runs pytest/vitest and returns killed mutants.
+7. `surviving` shrinks; if a wave is cleared, `adversary.generate_surviving_mutants` can add harder bugs.
 
-    subgraph P2["Phase 2 — Mutation loop (main.py)"]
-        direction TB
-        D["discover / load mutants"]
-        G["generate test<br/>generator.py to llm.py · tier=bulk (haiku)"]
-        E["verify · run_and_check<br/>pytest / vitest / repo-vitest"]
-        S["score kill_rate · log · shrink survivors"]
-        D --> G --> E --> S
-        S -->|"survivors remain"| Q{"plateau?"}
-        Q -->|"no"| G
-        Q -->|"yes, escalate"| U["bulk to strategy (opus)"] --> G
-    end
+The repair path reuses the same runner gate:
 
-    P2 --> DONE(["kill_rate + bugs_fixed + cost · run.jsonl"])
-```
-
-Both loops share one **ground-truth contract**: a bug/mutant is only "caught" when a test
-*passes on the correct code and fails on the broken code* — the test runner decides, not the
-model. `main.py` runs the mutation loop alone, `repair_main.py` runs the repair loop alone, and
-`orchestrate.py` runs Phase 1 → Phase 2 as a single repair-then-harden pipeline.
-
-### As nested loops
-
-The same system as nested loops (bounded `for … in range(...)` with early-exit stop
-conditions). Every name below is greppable in the repo:
-
-```
-orchestrate.main()                                       # the run · orchestrate.py
-│
-├─ run_repair(buggy, oracle, planted_bugs)               # PHASE 1 · repair_main.py
-│    for iteration in range(MAX_ITERATIONS):             #   per defect
-│        decision = find_bug(observation)                #     strategy.find_bug → has_bug, bug
-│        for attempt in range(RETRY_PER_BUG + 1):        #     retry a test+fix pair
-│            generate_bug_test(code, bug)                #       repair_generator (strategy tier)
-│            generate_fix(code, bug, test)               #       fixer
-│            if _verify_fix(...) and _suite_passes(...): #       accept: bites + no regression → break
-│        _discover_mutants(code)                         #     on accept (bulk tier)
-│        _harden(code, accepted_tests, mutants):         #     strengthen the suite
-│            for attempt in range(HARDEN_ATTEMPTS):      #
-│                generate_test(code, surviving)          #         generator
-│                _measure_kill_rate(...)                 #         → runner.run_and_check
-│                    for m in mutants:                   #             per mutant
-│                        _pytest_passes(test, m)         #               per run · GROUND TRUTH
-│        # stop: (graded == total and kill_rate >= 1)  or  no_progress >= PATIENCE
-│
-└─ _phase2_harden(repaired_code, suite)                  # PHASE 2 · orchestrate.py
-     for iteration in range(HARDEN_MAX):                 #   per round
-         generate_test(code, surviving)                  #     bulk → escalate to strategy on plateau
-         _measure_kill_rate(...) → run_and_check          #     per mutant → per run
-```
-
-| In the diagram | Real symbol · file |
-|---|---|
-| `find_bug` | `strategy.find_bug` |
-| `generate_bug_test` | `repair_generator.generate_bug_test` |
-| `generate_fix` | `fixer.generate_fix` |
-| `_verify_fix` · `_suite_passes` · `_discover_mutants` · `_harden` · `_measure_kill_rate` · `run_repair` | `repair_main.py` |
-| `generate_test` | `generator.generate_test` |
-| `run_and_check` · `_pytest_passes` | `runner.py` |
-| `_phase2_harden` · `main` | `orchestrate.py` |
-
-Note: the **retry** loop (`RETRY_PER_BUG`) and the **harden** loop (`HARDEN_ATTEMPTS`) are
-*siblings* inside the per-defect iteration, not a single deep chain; `main.py` standalone is
-just the mutation loop (`generate_test → run_and_check`, escalate on plateau).
+`find_bug → generate_bug_test → generate_fix → _verify_fix → _harden`
 
 | File | Role |
 |------|------|
-| `fixtures/` | targets — each exposes `REFERENCE_SRC`, `MUTANTS`, and a `LANGUAGE` |
-| `generator.py` | asks the LLM for one test (pytest or vitest) targeting the *surviving* mutants |
-| `runner.py` | Python verifier — runs the test vs reference (must pass) + each mutant (must fail) → kills |
-| `runner_ts.py` | TypeScript verifier — same contract, via a standalone `vitest` project (`ts_harness/`) |
-| `runner_repo_ts.py` | TypeScript verifier that runs inside a real repo checkout, using the repo's own `vitest` config |
-| `harness.py` | kill-rate metric, plateau detector, JSONL logger, baseline |
-| `main.py` | the loop: bulk tier → plateau → escalate to strategy tier → budget-cap stop |
-| `llm.py` | two-tier model router (cheap "bulk" vs smart "strategy") with pluggable backend |
+| `discover.py` / `acquire.py` | scan repos, select functions, generate compile-checked mutants |
+| `generator.py` | asks the model for one adversarial pytest/vitest test |
+| `runner.py` / `runner_ts.py` | ground-truth verifier: reference must pass, mutant must fail |
+| `main.py` | mutation loop: generate tests, kill mutants, escalate on plateau |
+| `repair_main.py` | repair loop: find bug, write failing test, fix, then harden |
+| `demo.py` | terminal visualization of the loop |
+| `bench.py` | deterministic regression benchmark for the loop mechanics |
 
 ### Targets
 
@@ -139,7 +68,7 @@ Pick a target with `FIXTURE` (default `toy`):
 ## Run
 
 ```bash
-pip install pytest          # plus the `claude` CLI logged in (default backend)
+pip install -r requirements.txt
 python main.py
 ```
 
@@ -147,6 +76,12 @@ Run a single iteration (handy for a quick check or demo):
 
 ```bash
 MAX_ITERATIONS=1 python main.py
+```
+
+Terminal visualization:
+
+```bash
+python demo.py --snapshot --max-iter 2
 ```
 
 Real output from a 1-iteration run on `fixtures/toy.py`:
@@ -192,11 +127,17 @@ all 5 mutants killed at iteration 1
 final kill_rate=1.000 over 5 mutants, cost=$0.1407, log at run.jsonl
 ```
 
-## Run against any repo (CLI)
+## Run against any repo
 
-Point the loop at a function in **any GitHub repo** — no fixture authoring. It fetches the
-file, asks the strategy model to generate realistic mutants (each validated to compile),
-infers the language from the extension, and runs the loop:
+Point the loop at a repo and let it pick self-contained targets:
+
+```bash
+python3 main.py repo=https://github.com/fiberplane/honcpiler max_targets=3 mutants=5
+```
+
+Or point it at one function directly. It fetches the file, asks the strategy model to
+generate realistic mutants, compile-checks each mutant, infers the language from the
+extension, and runs the loop:
 
 ```bash
 python3 main.py \
@@ -232,7 +173,8 @@ python3 main.py repo=~/Codes/NemoClaw file=src/lib/domain/duration.ts function=p
 ```
 
 Language is inferred from the file extension (`.ts`/`.tsx` → vitest, `.py` → pytest).
-Requires the `gh` CLI authenticated; for TypeScript, install the harness once
+For remote GitHub files, the loader tries `gh api` first and falls back to a shallow public
+clone if `gh` is unavailable or unauthenticated. For TypeScript, install the harness once
 (`cd ts_harness && npm install`). Env vars (iterations, caps, backend) apply as below.
 
 **Limitations (today):** the target file must be **self-contained** (no unresolved
@@ -449,9 +391,20 @@ stale-`.pyc` bug), the kill-rate/plateau metrics, the repo/JSON/code parsers, th
 contract (a real backend with no credentials raises rather than stubbing), and the repair
 loop's offline demo (3/3 planted bugs). TS/`npx`-dependent assertions skip when Node is absent.
 
+## Benchmark drift
+
+`bench.py` runs deterministic stub-backed scenarios and compares their final metrics with
+`bench_baseline.json`. Use it to catch accidental changes in loop mechanics:
+
+```bash
+python bench.py
+python bench.py --update   # accept intentional metric changes
+```
+
 ## Roadmap
 
-- **Auto-pick the target function** so `repo=` alone works (today you pass `file=`/`function=`).
 - **Files with imports:** resolve sibling modules into the harness so non-self-contained
   functions can be targeted (today the target file must be self-contained).
-- **More NemoClaw targets** across `src/lib/**` to grow coverage.
+- **Backend resilience:** keep repo discovery useful when a live strategy backend is down.
+- **Higher-fidelity repo runners:** support more real-project test runners beyond the current
+  pytest/vitest paths.
