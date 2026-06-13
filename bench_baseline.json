@@ -1,0 +1,19 @@
+{
+  "harden_toy_stub": {
+    "cumulative_tokens": 1515,
+    "kill_rate": 0.0,
+    "killed_mutant_ids": [],
+    "mutant_rounds": 0,
+    "stop_reason": "max_iterations",
+    "total_mutants": 5
+  },
+  "repair_buggy_stub": {
+    "bugs_fixed": 3,
+    "cumulative_tokens": 9511,
+    "fixes_made": 3,
+    "kill_rate": 1.0,
+    "stop_reason": "all_fixed",
+    "suite_size": 3,
+    "total_bugs": 3
+  }
+}

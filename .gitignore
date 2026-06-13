@@ -223,6 +223,7 @@ repair_run.jsonl
 repair_baseline.json
 repair_curve.png
 orchestrate_run.jsonl
+bench_logs/
 .claude/
 
 # ts_harness: vitest installed locally + per-run scratch files (package.json is tracked)
