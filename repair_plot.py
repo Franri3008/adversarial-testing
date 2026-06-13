@@ -4,8 +4,8 @@ import struct
 import zlib
 from typing import Any, Dict, List, Optional
 
-LOG_PATH = "run.jsonl"
-BASELINE_PATH = "baseline.json"
+LOG_PATH = "repair_run.jsonl"
+BASELINE_PATH = "repair_baseline.json"
 PLOT_PATH = "repair_curve.png"
 WIDTH = 900
 HEIGHT = 560

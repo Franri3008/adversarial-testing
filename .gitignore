@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Loopify runtime artifacts / local agent dir
+run.jsonl
+repair_run.jsonl
+repair_baseline.json
+repair_curve.png
+.claude/

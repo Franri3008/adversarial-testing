@@ -1,154 +1,100 @@
-REFERENCE_SRC = '''def clamp(value, low, high):
-    if value < low:
-        return low
-    if value > high:
-        return high
-    return value
-
-
-def mean(numbers):
-    if not numbers:
+REFERENCE_SRC = '''def grade(score, total):
+    if total <= 0:
         return 0.0
-    return sum(numbers) / len(numbers)
-
-
-def running_max(numbers):
-    result = []
-    best = None
-    for n in numbers:
-        if best is None or n > best:
-            best = n
-        result.append(best)
-    return result
+    ratio = score / total
+    if ratio < 0:
+        ratio = 0.0
+    if ratio > 1:
+        ratio = 1.0
+    return round(ratio * 100, 2)
 '''
 
-BUGGY_SRC = '''def clamp(value, low, high):
-    if value < low:
-        return low
-    if value > high:
-        return value
-    return value
+BUGGY_SRC = '''def grade(score, total):
+    ratio = score / total
+    return round(ratio * 100, 2)
+'''
 
+_FIX_AFTER_B1 = '''def grade(score, total):
+    if total <= 0:
+        return 0.0
+    ratio = score / total
+    return round(ratio * 100, 2)
+'''
 
-def mean(numbers):
-    return sum(numbers) / len(numbers)
-
-
-def running_max(numbers):
-    result = []
-    best = None
-    for n in numbers:
-        if best is None or n < best:
-            best = n
-        result.append(best)
-    return result
+_FIX_AFTER_B2 = '''def grade(score, total):
+    if total <= 0:
+        return 0.0
+    ratio = score / total
+    if ratio > 1:
+        ratio = 1.0
+    return round(ratio * 100, 2)
 '''
 
 PLANTED_BUGS = [
     {
-        "id": "B1_clamp_upper",
-        "description": "clamp returns the original value when it exceeds high instead of clamping to high.",
-        "target_name": "clamp",
-        "stub_test_src": '''def test_clamp_above_high():
-    assert clamp(10, 0, 5) == 5
+        "id": "B1_zero_total",
+        "description": "grade divides by total without guarding total <= 0, so grade(5, 0) raises ZeroDivisionError instead of returning 0.0.",
+        "target_name": "grade",
+        "stub_test_src": '''def test_grade_zero_total(grade):
+    assert grade(5, 0) == 0.0
 ''',
+        "stub_fixed_src": _FIX_AFTER_B1,
     },
     {
-        "id": "B2_mean_empty",
-        "description": "mean raises ZeroDivisionError on an empty list instead of returning 0.0.",
-        "target_name": "mean",
-        "stub_test_src": '''def test_mean_empty():
-    assert mean([]) == 0.0
+        "id": "B2_clamp_high",
+        "description": "grade never clamps the ratio to 1, so grade(150, 100) returns 150.0 instead of the maximum 100.0.",
+        "target_name": "grade",
+        "stub_test_src": '''def test_grade_clamps_high(grade):
+    assert grade(150, 100) == 100.0
 ''',
+        "stub_fixed_src": _FIX_AFTER_B2,
     },
     {
-        "id": "B3_running_max_min",
-        "description": "running_max uses < instead of >, so it tracks the running minimum rather than the maximum.",
-        "target_name": "running_max",
-        "stub_test_src": '''def test_running_max_tracks_max():
-    assert running_max([1, 3, 2, 5, 4]) == [1, 3, 3, 5, 5]
+        "id": "B3_clamp_low",
+        "description": "grade never clamps the ratio to 0, so grade(-5, 100) returns -5.0 instead of the minimum 0.0.",
+        "target_name": "grade",
+        "stub_test_src": '''def test_grade_clamps_low(grade):
+    assert grade(-5, 100) == 0.0
 ''',
+        "stub_fixed_src": REFERENCE_SRC,
     },
 ]
 
 MUTANTS = [
     {
-        "id": "M_clamp_low",
-        "description": "clamp ignores the lower bound.",
-        "src": '''def clamp(value, low, high):
-    if value > high:
-        return high
-    return value
-
-
-def mean(numbers):
-    if not numbers:
-        return 0.0
-    return sum(numbers) / len(numbers)
-
-
-def running_max(numbers):
-    result = []
-    best = None
-    for n in numbers:
-        if best is None or n > best:
-            best = n
-        result.append(best)
-    return result
+        "id": "M_no_guard",
+        "description": "grade drops the total <= 0 guard.",
+        "src": '''def grade(score, total):
+    ratio = score / total
+    if ratio < 0:
+        ratio = 0.0
+    if ratio > 1:
+        ratio = 1.0
+    return round(ratio * 100, 2)
 ''',
     },
     {
-        "id": "M_mean_off_by_one",
-        "description": "mean divides by len(numbers) + 1.",
-        "src": '''def clamp(value, low, high):
-    if value < low:
-        return low
-    if value > high:
-        return high
-    return value
-
-
-def mean(numbers):
-    if not numbers:
+        "id": "M_no_high",
+        "description": "grade drops the upper clamp.",
+        "src": '''def grade(score, total):
+    if total <= 0:
         return 0.0
-    return sum(numbers) / (len(numbers) + 1)
-
-
-def running_max(numbers):
-    result = []
-    best = None
-    for n in numbers:
-        if best is None or n > best:
-            best = n
-        result.append(best)
-    return result
+    ratio = score / total
+    if ratio < 0:
+        ratio = 0.0
+    return round(ratio * 100, 2)
 ''',
     },
     {
-        "id": "M_running_max_first",
-        "description": "running_max never updates best after the first element.",
-        "src": '''def clamp(value, low, high):
-    if value < low:
-        return low
-    if value > high:
-        return high
-    return value
-
-
-def mean(numbers):
-    if not numbers:
+        "id": "M_no_low",
+        "description": "grade drops the lower clamp.",
+        "src": '''def grade(score, total):
+    if total <= 0:
         return 0.0
-    return sum(numbers) / len(numbers)
-
-
-def running_max(numbers):
-    result = []
-    best = None
-    for n in numbers:
-        if best is None:
-            best = n
-        result.append(best)
-    return result
+    ratio = score / total
+    if ratio > 1:
+        ratio = 1.0
+    return round(ratio * 100, 2)
 ''',
     },
 ]
