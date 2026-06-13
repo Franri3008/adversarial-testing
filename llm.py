@@ -43,6 +43,15 @@ BULK_MODEL = os.environ.get("NEBIUS_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507");
 DEFAULT_NEBIUS_BASE_URL = "https://api.studio.nebius.com/v1";
 DEFAULT_MAX_TOKENS = 4096;
 
+STRATEGY_RATE_PER_MTOK = (
+    float(os.environ.get("STRATEGY_IN_RATE", "5.0")),
+    float(os.environ.get("STRATEGY_OUT_RATE", "25.0")),
+);
+BULK_RATE_PER_MTOK = (
+    float(os.environ.get("BULK_IN_RATE", "0.1")),
+    float(os.environ.get("BULK_OUT_RATE", "0.3")),
+);
+
 ROUTES = {
     "strategy": STRATEGY_MODEL,
     "bulk": BULK_MODEL,
@@ -72,6 +81,11 @@ def _warn(message: str) -> None:
 def _stub(prompt: str, model: str) -> Dict[str, Any]:
     tokens = {"in": max(1, len(prompt) // 4), "out": 64};
     return {"text": "STUB_COMPLETION", "model": model, "tokens": tokens, "cost": 0.0}
+
+
+def _cost(tokens: Dict[str, int], rate_per_mtok: Any) -> float:
+    in_rate, out_rate = rate_per_mtok;
+    return tokens["in"] / 1e6 * in_rate + tokens["out"] / 1e6 * out_rate
 
 
 def _complete_cli(prompt: str, role: str) -> Dict[str, Any]:
@@ -113,7 +127,7 @@ def _complete_strategy(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[
     response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}], **params);
     text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text");
     tokens = {"in": int(response.usage.input_tokens), "out": int(response.usage.output_tokens)};
-    return {"text": text, "model": model, "tokens": tokens}
+    return {"text": text, "model": model, "tokens": tokens, "cost": _cost(tokens, STRATEGY_RATE_PER_MTOK)}
 
 
 def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,7 +143,7 @@ def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str,
     text = response.choices[0].message.content or "";
     usage = response.usage;
     tokens = {"in": int(usage.prompt_tokens), "out": int(usage.completion_tokens)};
-    return {"text": text, "model": model, "tokens": tokens}
+    return {"text": text, "model": model, "tokens": tokens, "cost": _cost(tokens, BULK_RATE_PER_MTOK)}
 
 
 def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, Any]:
