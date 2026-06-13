@@ -4,11 +4,39 @@ import subprocess
 import sys
 from typing import Any, Dict
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv();
-except Exception as _dotenv_exc:
-    print("[llm] python-dotenv unavailable, relying on process environment: {}".format(_dotenv_exc), file=sys.stderr);
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Load a local .env into the environment.
+
+    Prefer python-dotenv when installed; otherwise parse .env ourselves so a local
+    .env works with zero extra dependencies (avoids PEP 668 install friction).
+    Existing process env vars win — .env only fills what is not already set.
+    """
+    try:
+        from dotenv import load_dotenv
+        load_dotenv();
+        return
+    except Exception:
+        pass
+    try:
+        with open(path) as handle:
+            for raw in handle:
+                line = raw.strip();
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export "):];
+                key, _, value = line.partition("=");
+                key = key.strip();
+                value = value.strip().strip('"').strip("'");
+                if key:
+                    os.environ.setdefault(key, value);
+    except FileNotFoundError:
+        pass
+
+
+_load_dotenv();
+
 
 STRATEGY_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8");
 BULK_MODEL = os.environ.get("NEBIUS_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507");
