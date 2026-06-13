@@ -61,6 +61,17 @@ def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str) -> bool
     return proc.returncode == 0
 
 
+def compiles(impl_src: str, function_name: str) -> bool:
+    """Smoke check: does this impl import and expose `function_name` as callable?
+
+    Used to drop LLM-generated mutants that don't compile/import, so a broken
+    mutant never counts as a false 'kill'.
+    """
+    smoke = f"def test_loads({function_name}):\n    assert callable({function_name})\n"
+    with tempfile.TemporaryDirectory(prefix="loopify-smoke-") as tmp:
+        return _pytest_passes(Path(tmp), impl_src, smoke, function_name)
+
+
 def run_and_check(
     test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
 ) -> Dict[str, Any]:

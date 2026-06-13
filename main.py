@@ -1,14 +1,9 @@
 import os
+import sys
+from typing import Dict, List
 
-from fixtures import LANGUAGE, MUTANTS, REFERENCE_SRC
 from generator import generate_test
 from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
-
-# Verifier is selected by the fixture's language: Python -> pytest, TypeScript -> vitest.
-if LANGUAGE == "typescript":
-    from runner_ts import run_and_check
-else:
-    from runner import run_and_check
 
 MAX_ITERATIONS = int(os.environ.get("LOOPIFY_MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
@@ -20,14 +15,57 @@ COST_CAP_USD = float(os.environ.get("LOOPIFY_COST_CAP", "5.0"))      # 0 disable
 TOKEN_CAP = int(os.environ.get("LOOPIFY_TOKEN_CAP", "0"))            # 0 disables
 
 
-def main() -> None:
-    logger = JsonlLogger(LOG_PATH)
-    total = len(MUTANTS)
+def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for arg in argv:
+        if "=" in arg:
+            key, _, value = arg.partition("=")
+            out[key.strip()] = value.strip()
+    return out
 
-    baseline = run_baseline(REFERENCE_SRC, MUTANTS, generate_test, run_and_check)
+
+def _resolve_target():
+    """CLI mode (repo=/file=/function=) acquires a target from a real repo;
+    otherwise fall back to a built-in fixture (LOOPIFY_FIXTURE)."""
+    kwargs = _parse_kwargs(sys.argv[1:])
+    if kwargs.get("repo") or kwargs.get("file"):
+        from acquire import acquire_target
+
+        missing = [k for k in ("repo", "file", "function") if not kwargs.get(k)]
+        if missing:
+            raise SystemExit(f"CLI mode needs: repo=, file=, function= (missing: {missing})")
+        n = int(kwargs.get("mutants", "5"))
+        t = acquire_target(kwargs["repo"], kwargs["file"], kwargs["function"], n)
+        return t.reference_src, t.mutants, t.language, t.function_name
+
+    import fixtures
+
+    return fixtures.REFERENCE_SRC, fixtures.MUTANTS, fixtures.LANGUAGE, fixtures.FUNCTION_NAME
+
+
+def _get_runner(language: str):
+    if language == "typescript":
+        from runner_ts import run_and_check
+    else:
+        from runner import run_and_check
+    return run_and_check
+
+
+def main() -> None:
+    reference_src, mutants, language, function_name = _resolve_target()
+    run_and_check = _get_runner(language)
+
+    # Bind language/function so generation works for both fixture and CLI targets.
+    def gen_fn(ref, surviving, role="bulk"):
+        return generate_test(ref, surviving, role=role, language=language, function_name=function_name)
+
+    logger = JsonlLogger(LOG_PATH)
+    total = len(mutants)
+
+    baseline = run_baseline(reference_src, mutants, gen_fn, run_and_check)
     print("baseline kill_rate={:.3f} tokens={}".format(baseline["kill_rate"], baseline["cumulative_tokens"]))
 
-    surviving = list(MUTANTS)
+    surviving = list(mutants)
     killed_total = set()
     cumulative_tokens = 0
     cumulative_cost = 0.0
@@ -37,11 +75,11 @@ def main() -> None:
     print("iter  tier      cum_tokens   cost$    kill_rate  killed_this_round")
     for iteration in range(1, MAX_ITERATIONS + 1):
         role = ROLE_ORDER[role_idx]
-        gen = generate_test(REFERENCE_SRC, surviving, role=role)
+        gen = gen_fn(reference_src, surviving, role=role)
         cumulative_tokens += gen["tokens"]["in"] + gen["tokens"]["out"]
         cumulative_cost += gen.get("cost", 0.0)
 
-        result = run_and_check(gen["test_src"], REFERENCE_SRC, surviving)
+        result = run_and_check(gen["test_src"], reference_src, surviving)
         killed_this_round = result["killed_mutant_ids"] if result["reference_passed"] else []
         for mid in killed_this_round:
             killed_total.add(mid)
