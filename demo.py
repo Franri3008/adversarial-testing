@@ -442,13 +442,19 @@ def make_sim_complete(llm):
 
 def run(opts):
     import llm
-    from fixtures import MUTANTS, REFERENCE_SRC
     from generator import generate_test
     from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
-    from runner import run_and_check
+    from main import _get_runner, resolve_target
 
     if not opts.live:
         llm.complete = make_sim_complete(llm)
+
+    REFERENCE_SRC, MUTANTS, language, function_name, runner, test_import_path = resolve_target(opts.target)
+    run_and_check = _get_runner(language, runner)
+
+    def gen_fn(ref, surviving, role="bulk"):
+        return generate_test(ref, surviving, role=role, language=language,
+                             function_name=function_name, test_import_path=test_import_path)
 
     term_w = shutil.get_terminal_size(fallback=(96, 30)).columns
     W = opts.width or min(max(term_w, 76), 160)
@@ -511,7 +517,7 @@ def run(opts):
 
         baseline = spin_during(
             "computing cold-start baseline",
-            lambda: run_baseline(REFERENCE_SRC, MUTANTS, generate_test, run_and_check),
+            lambda: run_baseline(REFERENCE_SRC, MUTANTS, gen_fn, run_and_check),
         )
         st["events"].append(("info", "baseline kill_rate={:.2f}  ({} tokens, cold start)".format(baseline["kill_rate"], baseline["cumulative_tokens"])))
         screen.commit(st)
@@ -519,13 +525,14 @@ def run(opts):
         surviving = list(MUTANTS)
         killed_total = set()
         kill_rates = []
+        suite_sources = []
 
         for iteration in range(1, opts.max_iter + 1):
             st["iteration"] = iteration
 
             gen = spin_during(
                 "generating adversarial test ({})".format(st["bulk_model"].split("/")[-1]),
-                lambda: generate_test(REFERENCE_SRC, surviving),
+                lambda: gen_fn(REFERENCE_SRC, surviving),
             )
             delta = gen["tokens"]["in"] + gen["tokens"]["out"]
             st["tokens"] += delta
@@ -537,6 +544,8 @@ def run(opts):
                 lambda: run_and_check(gen["test_src"], REFERENCE_SRC, surviving),
             )
             killed_this_round = result["killed_mutant_ids"] if result["reference_passed"] else []
+            if result["reference_passed"] and killed_this_round:
+                suite_sources.append(gen["test_src"])
 
             for mid in killed_this_round:
                 if mid in killed_total:
@@ -580,6 +589,21 @@ def run(opts):
         if screen.live:
             time.sleep(0.4)
 
+    import report
+    meta = {
+        "repo": opts.target.get("repo", "(built-in fixture)"),
+        "file": opts.target.get("file", "-"),
+        "function": function_name or opts.target.get("function", "-"),
+        "language": language,
+        "strategy_model": st["strategy_model"],
+        "bulk_model": st["bulk_model"],
+        "total_mutants": total,
+        "surviving": surviving,
+    }
+    report_path = report.write_report(meta, logger.entries, suite_sources, baseline=baseline);
+    st["events"].append(("done", "report written to {}".format(report_path)));
+    print("report at {}".format(report_path));
+
 SPEEDS = {"slow": 1.1, "normal": 0.6, "fast": 0.25}
 
 
@@ -594,7 +618,15 @@ def main():
     p.add_argument("--width", type=int, default=None, help="force a render width")
     p.add_argument("--max-iter", type=int, default=25, help="maximum iterations (default: 25)")
     p.add_argument("--log", default="demo_run.jsonl", help="jsonl log path (default: demo_run.jsonl)")
-    opts = p.parse_args()
+    opts, extras = p.parse_known_args()
+
+    # repo=/file=/function= survive as extras and select a real-repo target
+    # (same resolution as main.py); with none given, the built-in fixture is used.
+    opts.target = {}
+    for arg in extras:
+        if "=" in arg:
+            key, _, value = arg.partition("=")
+            opts.target[key.strip()] = value.strip()
 
     if opts.no_color:
         USE_COLOR = False
