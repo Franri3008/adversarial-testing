@@ -43,6 +43,12 @@ BULK_MODEL = os.environ.get("NEBIUS_MODEL", "Qwen/Qwen3-30B-A3B-Instruct-2507");
 DEFAULT_NEBIUS_BASE_URL = "https://api.studio.nebius.com/v1";
 DEFAULT_MAX_TOKENS = 4096;
 
+# Strategy transport. Default routes the strategist to Anthropic (opus). Set
+# STRATEGY_PROVIDER=nebius to run the strategist on a strong open model instead
+# (e.g. when Anthropic credits are unavailable) — same OpenAI-compatible path as bulk.
+STRATEGY_PROVIDER = os.environ.get("STRATEGY_PROVIDER", "anthropic");
+STRATEGY_NEBIUS_MODEL = os.environ.get("STRATEGY_NEBIUS_MODEL", "Qwen/Qwen3-235B-A22B-Instruct-2507");
+
 STRATEGY_RATE_PER_MTOK = (
     float(os.environ.get("STRATEGY_IN_RATE", "5.0")),
     float(os.environ.get("STRATEGY_OUT_RATE", "25.0")),
@@ -98,7 +104,12 @@ def _complete_cli(prompt: str, role: str) -> Dict[str, Any]:
         timeout=CLI_TIMEOUT,
     );
     if proc.returncode != 0:
-        raise RuntimeError("claude cli exit {}: {}".format(proc.returncode, proc.stderr[:200]));
+        detail = proc.stderr.strip();
+        try:
+            detail = json.loads(proc.stdout).get("result") or detail;
+        except Exception:
+            pass
+        raise RuntimeError("claude cli exit {}: {}".format(proc.returncode, (detail or "<no output>")[:200]));
     data = json.loads(proc.stdout);
     if data.get("is_error"):
         raise RuntimeError("claude cli reported error: {}".format(data.get("result"))[:200]);
@@ -153,6 +164,8 @@ def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, An
             return _complete_cli(prompt, role)
         if role == "bulk":
             return _complete_bulk(prompt, model, kwargs)
+        if STRATEGY_PROVIDER == "nebius":
+            return _complete_bulk(prompt, STRATEGY_NEBIUS_MODEL, kwargs)
         return _complete_strategy(prompt, model, kwargs)
     except Exception as exc:
         _warn("{} call failed ({}: {}); using stub fallback".format(role, type(exc).__name__, exc));

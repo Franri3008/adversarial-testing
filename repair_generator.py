@@ -45,10 +45,10 @@ def _is_valid_fixture_test(test_src: str, fn: str) -> bool:
     return has_test
 
 
-def generate_bug_test(code: str, bug: Dict[str, Any], stub_test_src: Optional[str] = None) -> Dict[str, Any]:
+def generate_bug_test(code: str, bug: Dict[str, Any], stub_test_src: Optional[str] = None, role: str = "bulk") -> Dict[str, Any]:
     fn = bug.get("target_name") or _function_name(code);
     prompt = _build_bug_test_prompt(code, bug, fn);
-    response = llm.complete(prompt, role="bulk");
+    response = llm.complete(prompt, role=role);
     text = response.get("text", "");
     if text.strip() == "STUB_COMPLETION":
         fallback = stub_test_src if stub_test_src else "";
