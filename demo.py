@@ -382,13 +382,15 @@ class Screen:
 
     def __enter__(self):
         if self.live:
-            sys.stdout.write("\033[?25l\033[2J")
+            # Alt screen buffer has no scrollback, so overflow clips instead of pushing
+            # earlier frames into history (which is what makes selections drift upward).
+            sys.stdout.write("\033[?1049h\033[?25l\033[2J\033[H")
             sys.stdout.flush()
         return self
 
     def __exit__(self, *exc):
         if self.live:
-            sys.stdout.write("\033[?25h\n")
+            sys.stdout.write("\033[?25h\033[?1049l")
             sys.stdout.flush()
 
     def commit(self, st):
