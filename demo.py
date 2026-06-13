@@ -449,7 +449,20 @@ def run(opts):
     if not opts.live:
         llm.complete = make_sim_complete(llm)
 
-    REFERENCE_SRC, MUTANTS, language, function_name, runner, test_import_path = resolve_target(opts.target)
+    # repo without a function -> discover the first eligible target to visualize.
+    if opts.target.get("repo") and not opts.target.get("function"):
+        import discover
+        n = int(opts.target.get("mutants", "5"))
+        found = discover.discover_targets(opts.target["repo"], mutants_per=n, max_targets=1, only_file=opts.target.get("file"))
+        if not found:
+            raise SystemExit("no eligible self-contained functions found in {}".format(opts.target["repo"]))
+        rel, t = found[0]
+        opts.target.setdefault("file", rel)
+        opts.target["function"] = t.function_name
+        REFERENCE_SRC, MUTANTS, language, function_name = t.reference_src, t.mutants, t.language, t.function_name
+        runner, test_import_path = None, None
+    else:
+        REFERENCE_SRC, MUTANTS, language, function_name, runner, test_import_path = resolve_target(opts.target)
     run_and_check = _get_runner(language, runner)
 
     def gen_fn(ref, surviving, role="bulk"):
@@ -477,6 +490,8 @@ def run(opts):
         "events": [("info", "arena initialized, {} mutants loaded".format(len(MUTANTS)))],
         "log": opts.log,
     }
+    if opts.target.get("repo"):
+        st["events"].append(("info", "hardening {}::{}".format(opts.target.get("file", "?"), function_name)))
 
     delay = opts.delay
     screen = Screen(live=sys.stdout.isatty(), snapshot=opts.snapshot)
