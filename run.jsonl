@@ -1,8 +1,3 @@
-{"iteration": 1, "cumulative_tokens": 4236, "kill_rate": 0.2, "killed_this_round": ["M1_no_sort"]}
-{"iteration": 2, "cumulative_tokens": 5651, "kill_rate": 0.4, "killed_this_round": ["M2_strict_overlap"]}
-{"iteration": 3, "cumulative_tokens": 6836, "kill_rate": 0.6, "killed_this_round": ["M3_overwrite_end"]}
-{"iteration": 4, "cumulative_tokens": 7375, "kill_rate": 0.8, "killed_this_round": ["M4_drop_last"]}
-{"iteration": 5, "cumulative_tokens": 7703, "kill_rate": 1.0, "killed_this_round": ["M5_empty_returns_none"]}
-{"iteration": 6, "cumulative_tokens": 8550, "kill_rate": 1.0, "killed_this_round": []}
-{"iteration": 7, "cumulative_tokens": 9401, "kill_rate": 1.0, "killed_this_round": []}
-{"iteration": 8, "cumulative_tokens": 12304, "kill_rate": 1.0, "killed_this_round": []}
+{"iteration": 1, "cumulative_tokens": 2220, "bugs_fixed": 1, "kill_rate": 0.3333333333333333, "fixed_this_round": "B1_clamp_upper"}
+{"iteration": 2, "cumulative_tokens": 4136, "bugs_fixed": 2, "kill_rate": 0.3333333333333333, "fixed_this_round": "B2_mean_empty"}
+{"iteration": 3, "cumulative_tokens": 6094, "bugs_fixed": 3, "kill_rate": 0.3333333333333333, "fixed_this_round": "B3_running_max_min"}
