@@ -1,6 +1,4 @@
-{"iteration": 1, "cumulative_tokens": 1436, "kill_rate": 0.0, "killed_this_round": []}
-{"iteration": 2, "cumulative_tokens": 2886, "kill_rate": 0.0, "killed_this_round": []}
-{"iteration": 3, "cumulative_tokens": 4360, "kill_rate": 0.8, "killed_this_round": ["endswith_wrong_path", "flipped_version_typecheck", "dev_uses_dependencies", "swapped_return_fields"]}
-{"iteration": 4, "cumulative_tokens": 5184, "kill_rate": 0.8, "killed_this_round": []}
-{"iteration": 5, "cumulative_tokens": 6025, "kill_rate": 0.8, "killed_this_round": []}
-{"iteration": 6, "cumulative_tokens": 6849, "kill_rate": 0.8, "killed_this_round": []}
+{"iteration": 1, "cumulative_tokens": 1529, "kill_rate": 0.0, "killed_this_round": []}
+{"iteration": 2, "cumulative_tokens": 3371, "kill_rate": 0.0, "killed_this_round": []}
+{"iteration": 3, "cumulative_tokens": 5104, "kill_rate": 0.0, "killed_this_round": []}
+{"iteration": 4, "cumulative_tokens": 6398, "kill_rate": 0.0, "killed_this_round": []}

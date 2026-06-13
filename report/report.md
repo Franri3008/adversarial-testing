@@ -16,27 +16,27 @@
 ![convergence](convergence.png)
 
 - **Baseline (one cold-start test):** 0% kill rate
-- **Final (hardened suite):** 80% kill rate over 5 mutants
-- **Gain from looping:** +80%
-- **Tokens spent:** 6,849
+- **Final (hardened suite):** 0% kill rate over 5 mutants
+- **Gain from looping:** +0%
+- **Tokens spent:** 6,398
 
 ## Progress per iteration
 
 | iter | tier | cum. tokens | kill rate | killed this round |
 |---|---|---|---|---|
-| 1 | - | 1,436 | 0% | — |
-| 2 | - | 2,886 | 0% | — |
-| 3 | - | 4,360 | 80% | endswith_wrong_path, flipped_version_typecheck, dev_uses_dependencies, swapped_return_fields |
-| 4 | - | 5,184 | 80% | — |
-| 5 | - | 6,025 | 80% | — |
-| 6 | - | 6,849 | 80% | — |
+| 1 | - | 1,529 | 0% | — |
+| 2 | - | 3,371 | 0% | — |
+| 3 | - | 5,104 | 0% | — |
+| 4 | - | 6,398 | 0% | — |
 
 ## Mutants still surviving
 
-- `dropped_missing_guard` — Removes the !packageJsonFile guard so a missing package.json no longer throws
+- `swap_deps` — devDependencies pushed into dependencies array (swapped target)
+- `flipped_type_check` — version type check flipped to !== string, so valid string deps are skipped
+- `dropped_missing_guard` — removed the !packageJsonFile guard, no error thrown when package.json missing
+- `wrong_path_match` — uses startsWith instead of endsWith for nested package.json path
+- `skip_devdeps_parse` — devDependencies object guard uses OR instead of AND, causing crash/wrong behavior
 
 ## Generated adversarial tests (the changes)
 
-The loop wrote 1 test(s) into this suite:
-
-- [`adversarial_test_01.ts`](tests/adversarial_test_01.ts)
+No tests were retained.

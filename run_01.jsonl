@@ -1,4 +1,6 @@
-{"iteration": 1, "cumulative_tokens": 624, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0001}
-{"iteration": 2, "cumulative_tokens": 1046, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0002}
-{"iteration": 3, "cumulative_tokens": 1433, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0003}
-{"iteration": 4, "cumulative_tokens": 1830, "kill_rate": 1.0, "killed_this_round": ["wrong_string_literal", "missing_exclamation", "wrong_name_typo", "no_print", "lowercase_hello"], "tier": "bulk", "cost_usd": 0.0004}
+{"iteration": 1, "cumulative_tokens": 1625, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0004}
+{"iteration": 2, "cumulative_tokens": 3305, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0007}
+{"iteration": 3, "cumulative_tokens": 5459, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0013}
+{"iteration": 4, "cumulative_tokens": 7066, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0016}
+{"iteration": 5, "cumulative_tokens": 9133, "kill_rate": 0.8, "killed_this_round": ["swap_deps_devdeps", "flipped_type_check", "wrong_endswith_path", "find_negated_guard"], "tier": "strategy", "cost_usd": 0.0322}
+{"iteration": 6, "cumulative_tokens": 10744, "kill_rate": 1.0, "killed_this_round": ["dropped_devdeps_guard"], "tier": "strategy", "cost_usd": 0.0537}
