@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import functools
 import json
 import shutil
 import sys
@@ -349,7 +350,101 @@ def convergence_cells(st, panel_w):
 TOP_MARGIN = 2  # blank lines above the banner so it isn't flush against the prompt
 
 
+def function_cells(st, panel_w):
+    """One row per tracked function: status, name, kill-rate bar, killed/total."""
+    inner = panel_w - 4
+    name_w = min(30, max(16, inner - 18))
+    cells = []
+    for i, f in enumerate(st["functions"]):
+        c = Cell()
+        if f["done"]:
+            c.text("✓ ", GREEN, bold=True)
+        elif i == st.get("active", -1):
+            c.text(SPIN[st["spin"] % len(SPIN)] + " ", CYAN, bold=True)
+        else:
+            c.text("· ", GREY)
+        active = (i == st.get("active", -1))
+        c.text(trunc(f["name"], name_w).ljust(name_w), WHITE if active or f["done"] else GREY, bold=active)
+        v = f["kill_rate"]
+        col = GREEN if v >= 0.8 else (YELLOW if v >= 0.4 else (ORANGE if v > 0 else GREY))
+        styled, vis = bar(v, max(6, inner - name_w - 9), col)
+        c.raw(styled, vis)
+        c.text(" {:>2}/{:<2}".format(f["killed"], f["total"]), col, bold=True)
+        cells.append(c)
+    return cells
+
+
+def repo_telemetry_cells(st, panel_w):
+    inner = panel_w - 4
+    LBL = 12
+    cells = []
+
+    def row(label, build):
+        c = Cell()
+        c.text(label.ljust(LBL), GREY)
+        build(c)
+        cells.append(c)
+
+    row("functions", lambda c: c.text("{} / {}".format(st["done_count"], len(st["functions"])), WHITE, bold=True))
+
+    def kr(c):
+        v = st["kill_rate"]
+        col = GREEN if v >= 0.8 else (YELLOW if v >= 0.4 else RED)
+        styled, vis = bar(v, max(8, inner - LBL - 6), col)
+        c.raw(styled, vis)
+        c.text(" {:>3}%".format(int(round(v * 100))), col, bold=True)
+
+    row("repo kill", kr)
+    row("bugs caught", lambda c: c.text("{} ".format(st["killed"]), GREEN, bold=True).text("/ {} across repo".format(st["total"]), GREY))
+
+    def tok(c):
+        c.text("{:,}".format(st["tokens"]), YELLOW, bold=True)
+        sp = sparkline(st["token_history"])
+        if sp:
+            c.text("  " + sp, ORANGE)
+
+    row("tokens", tok)
+    row("adversary", lambda c: c.text(trunc(st["strategy_model"].split("/")[-1], inner - LBL), CYAN, bold=True))
+    row("defender", lambda c: c.text(trunc(st["bulk_model"].split("/")[-1], inner - LBL), PURPLE, bold=True))
+
+    def status(c):
+        if st.get("done"):
+            c.text("★ repo hardened", GREEN, bold=True)
+        else:
+            c.text(SPIN[st["spin"] % len(SPIN)] + " ", CYAN, bold=True).text(st.get("status", ""), CYAN)
+
+    row("status", status)
+    return cells
+
+
+def render_repo(st):
+    W = st["W"]
+    out = ["" for _ in range(TOP_MARGIN)]
+    out += compose_banner(W)
+    out.append(center_line("repo-wide hardening arena — {} functions tracked".format(len(st["functions"])), W, GREY))
+    out.append("")
+
+    gap = 3
+    left_w = int((W - gap) * 0.60)
+    right_w = W - gap - left_w
+    body_h = max(len(st["functions"]), 7)
+
+    left = panel("FUNCTIONS  ({}/{} hardened)".format(st["done_count"], len(st["functions"])), function_cells(st, left_w), left_w, body_h)
+    right = panel("TELEMETRY", repo_telemetry_cells(st, right_w), right_w, body_h)
+    for a, b in zip(left, right):
+        out.append(a + " " * gap + b)
+
+    out.append("")
+    out += panel("EVENT LOG", event_cells(st, W, 5), W, 5)
+    out.append("")
+    out += panel("CONVERGENCE  (repo-wide kill rate over the sweep)", convergence_cells(st, W), W, CHART_H + 2)
+    out.append(center_line("Ctrl-C to quit", W, GREY))
+    return out
+
+
 def render(st):
+    if st.get("mode") == "repo":
+        return render_repo(st)
     W = st["W"]
     out = ["" for _ in range(TOP_MARGIN)]
     out += compose_banner(W)
@@ -452,8 +547,17 @@ def run(opts):
     import adversary
     from main import MUTANT_ROUNDS, MUTANTS_PER_ROUND, ROLE_ORDER, _get_runner, resolve_target
 
-    if not opts.live:
+    # The offline simulator only knows the built-in fixture — it returns canned
+    # merge_intervals tests for ANY prompt. So it's only valid when no real repo is
+    # targeted; running discovery/harden of a real repo through it just feeds garbage
+    # to mutant-gen. When a repo is given we use real LLM calls regardless of --live.
+    targeting_repo = bool(opts.target.get("repo"))
+    if not opts.live and not targeting_repo:
         llm.complete = make_sim_complete(llm)
+    elif not opts.live and targeting_repo:
+        print("[demo] real repo target -> using live LLM calls (the offline simulation only "
+              "knows the built-in fixture). For a fast, no-token showcase of a finished run, "
+              "run main.py once then:  python3 demo.py --replay <run_log.jsonl>")
 
     # repo without a function -> discover the first eligible target to visualize.
     if opts.target.get("repo") and not opts.target.get("function"):
@@ -461,15 +565,22 @@ def run(opts):
         n = int(opts.target.get("mutants", "5"))
         found = discover.discover_targets(opts.target["repo"], mutants_per=n, max_targets=1, only_file=opts.target.get("file"))
         if not found:
-            raise SystemExit("no eligible self-contained functions found in {}".format(opts.target["repo"]))
+            raise SystemExit(
+                "no targets with valid mutants in {} — see the discover log above: either "
+                "nothing passed the import/eligibility gate, or mutant generation failed for "
+                "every candidate attempted (the ✗ lines).".format(opts.target["repo"]))
         rel, t = found[0]
         opts.target.setdefault("file", rel)
         opts.target["function"] = t.function_name
         REFERENCE_SRC, MUTANTS, language, function_name = t.reference_src, t.mutants, t.language, t.function_name
-        runner, test_import_path = None, None
+        runner, test_import_path, context = None, None, t.context
     else:
         REFERENCE_SRC, MUTANTS, language, function_name, runner, test_import_path = resolve_target(opts.target)
-    run_and_check = _get_runner(language, runner)
+        context = None
+    base_run_and_check = _get_runner(language, runner)
+    # Not-self-contained targets carry a package import context; bind it so run_and_check
+    # rebuilds the package sandbox (standalone targets keep the plain signature).
+    run_and_check = functools.partial(base_run_and_check, context=context) if context else base_run_and_check
 
     def gen_fn(ref, surviving, role="bulk"):
         return generate_test(ref, surviving, role=role, language=language,
@@ -559,7 +670,7 @@ def run(opts):
             tier_name = "smart" if role == "strategy" else "fast"
             active_model = st["strategy_model"] if role == "strategy" else st["bulk_model"]
             gen = spin_during(
-                "defender writing a test — {} tier ({})".format(tier_name, active_model.split("/")[-1]),
+                "defender writing a test",
                 lambda: gen_fn(REFERENCE_SRC, surviving, role=role),
             )
             delta = gen["tokens"]["in"] + gen["tokens"]["out"]
@@ -619,7 +730,8 @@ def run(opts):
                     "adversary inventing bugs the suite misses (round {})".format(mutant_round),
                     lambda: adversary.generate_surviving_mutants(
                         REFERENCE_SRC, function_name, language, suite_sources, run_and_check,
-                        n=MUTANTS_PER_ROUND, existing_ids=existing_ids, round_idx=mutant_round, role="strategy"),
+                        n=MUTANTS_PER_ROUND, existing_ids=existing_ids, round_idx=mutant_round, role="strategy",
+                        context=context),
                 )
                 st["tokens"] += adv["tokens"]
                 st["token_history"].append(adv["tokens"])
@@ -687,6 +799,220 @@ def run(opts):
     st["events"].append(("done", "report written to {}".format(report_path)));
     print("report at {}".format(report_path));
 
+def _is_metric(entry):
+    """An iteration data-point — exactly what report._metric_entries plots, so the replay
+    graph is identical to main.py's report graph. Matches BOTH schemas: the structured
+    `iteration_completed`/`run_finished` events and the flat `make_log_entry` lines."""
+    return "kill_rate" in entry and entry.get("event") in (None, "iteration_completed", "run_finished")
+
+
+def replay(opts):
+    """DEMO MODE: re-animate a real main.py run from its jsonl log — no LLM calls.
+
+    State is reconstructed from the log, so the convergence curve here IS the data main.py's
+    report plots: replay is the guarantee the demo and the full run show the identical curve.
+    Works on both the structured-event log and the flat make_log_entry log.
+    """
+    import llm
+
+    with open(opts.replay) as handle:
+        entries = [json.loads(line) for line in handle if line.strip()]
+
+    started = next((e for e in entries if e.get("event") == "run_started"), {})
+    target = started.get("target", {}) or {}
+    # Descriptions, when the log carries structured mutant records (richer panel).
+    desc_by_id = {}
+    for e in entries:
+        for m in (e.get("mutants") or []) + (e.get("surviving_mutants") or []):
+            if m.get("id"):
+                desc_by_id.setdefault(m["id"], m.get("description", ""))
+    max_iter = max([e.get("iteration", 0) for e in entries if e.get("iteration") is not None] + [1])
+
+    term_w = shutil.get_terminal_size(fallback=(96, 30)).columns
+    W = opts.width or min(max(term_w, 76), 160)
+
+    st = {
+        "W": W,
+        "mutants": [],
+        "iteration": 0,
+        "max_iter": max_iter,
+        "kill_rate": 0.0,
+        "killed": 0,
+        "total": 0,
+        "tokens": 0,
+        "token_history": [],
+        "kill_series": [],
+        "status": "replaying {}".format(target.get("label") or target.get("function") or "run"),
+        "spin": 0,
+        "strategy_model": llm.ROUTES.get("strategy", "?"),
+        "bulk_model": llm.ROUTES.get("bulk", "?"),
+        "events": [("info", "REPLAY of {} ({} iterations)".format(opts.replay, max_iter))],
+        "log": None,
+    }
+    if target.get("label") or target.get("function"):
+        st["events"].append(("info", "target {}".format(target.get("label") or target.get("function"))))
+
+    killed_ids = []          # real ids, accumulated in kill order
+    screen = Screen(live=sys.stdout.isatty(), snapshot=opts.snapshot)
+
+    def rebuild_panel(flash_ids=()):
+        # The board = every killed mutant (named by its real id) + the surviving remainder.
+        rows = []
+        for kid in killed_ids:
+            rows.append({"id": kid, "desc": desc_by_id.get(kid, ""), "status": "killed", "flash": kid in flash_ids})
+        for k in range(max(0, st["total"] - len(killed_ids))):
+            rows.append({"id": "surviving_bug_{}".format(k + 1), "desc": "bug the suite hasn't caught yet", "status": "alive", "flash": False})
+        st["mutants"] = rows
+
+    with screen:
+        screen.commit(st)
+        if screen.live:
+            time.sleep(0.4)
+        for e in entries:
+            if not _is_metric(e):     # run_started / mutants_generated narration — skip
+                continue
+            if e.get("event") == "run_finished":
+                st["kill_rate"] = e.get("kill_rate", st["kill_rate"])
+                st["kill_series"].append(st["kill_rate"])    # report includes the run_finished point
+                st["done"] = True
+                stop = e.get("stop_reason", "")
+                st["plateau"] = stop in ("adversary_defeated", "plateau", "defender_plateau", "rounds_exhausted")
+                st["events"].append(("done", "final kill_rate={:.0%} — {} ({} mutants)".format(st["kill_rate"], stop or "done", st["total"])))
+                screen.commit(st)
+                if screen.live:
+                    time.sleep(0.5)
+                continue
+
+            # An iteration data-point (flat line or iteration_completed event).
+            prev_tokens = st["tokens"]
+            st["iteration"] = e.get("iteration", st["iteration"] + 1)
+            st["tokens"] = e.get("cumulative_tokens", prev_tokens)
+            st["token_history"].append(max(0, st["tokens"] - prev_tokens))
+            st["tier"] = e.get("tier")
+            new_total = e.get("total_mutants", st["total"])
+            if new_total > st["total"] and st["total"] > 0:    # a wave: the board grew
+                st["events"].append(("warn", "adversary round {}: +{} new bugs the suite missed".format(
+                    e.get("mutant_round", "?"), new_total - st["total"])))
+            st["total"] = new_total
+            killed_now = e.get("killed_this_round") or []
+            for kid in killed_now:
+                if kid not in killed_ids:
+                    killed_ids.append(kid)
+                st["events"].append(("kill", "iter {}: KILLED {}".format(st["iteration"], kid)))
+            st["killed"] = e.get("killed_cumulative", len(killed_ids))
+            st["kill_rate"] = e.get("kill_rate", st["kill_rate"])
+            st["kill_series"].append(st["kill_rate"])          # identical to report's metric series
+            st["status"] = "iter {} — {} tier".format(st["iteration"], e.get("tier", "?"))
+            rebuild_panel(flash_ids=set(killed_now))
+            screen.commit(st)
+            if screen.live:
+                if killed_now:
+                    time.sleep(min(0.18, opts.delay))
+                    rebuild_panel()
+                time.sleep(opts.delay)
+
+
+def _load_run(path):
+    """Return (label, metric_entries) for one run log. Label comes from the structured
+    run_started.target when present, else the file name (flat logs carry no target)."""
+    import os
+    with open(path) as handle:
+        entries = [json.loads(line) for line in handle if line.strip()]
+    started = next((e for e in entries if e.get("event") == "run_started"), {})
+    target = (started.get("target") or {}) if started else {}
+    label = target.get("label") or target.get("function") or os.path.splitext(os.path.basename(path))[0]
+    return label, [e for e in entries if _is_metric(e)]
+
+
+def replay_repo(opts, log_paths):
+    """DEMO MODE (repo-wide): play EVERY tracked function as a live leaderboard with a
+    single repo-wide kill-rate curve. Each function's run is replayed in turn; the board
+    fills in and the aggregate curve climbs (dipping each time a new function — or an
+    adversary wave — brings fresh uncaught bugs into the arena)."""
+    import llm
+
+    targets = []
+    for path in log_paths:
+        label, metrics = _load_run(path)
+        if metrics:
+            targets.append({"name": label, "metrics": metrics})
+    if not targets:
+        raise SystemExit("no usable run logs in {}".format(log_paths))
+
+    term_w = shutil.get_terminal_size(fallback=(96, 30)).columns
+    W = opts.width or min(max(term_w, 76), 160)
+    functions = [{"name": t["name"], "kill_rate": 0.0, "killed": 0, "total": 0, "tokens": 0, "tier": "", "done": False} for t in targets]
+    st = {
+        "W": W,
+        "mode": "repo",
+        "functions": functions,
+        "active": -1,
+        "done_count": 0,
+        "kill_rate": 0.0,
+        "killed": 0,
+        "total": 0,
+        "tokens": 0,
+        "token_history": [],
+        "kill_series": [],
+        "status": "starting repo sweep",
+        "spin": 0,
+        "strategy_model": llm.ROUTES.get("strategy", "?"),
+        "bulk_model": llm.ROUTES.get("bulk", "?"),
+        "events": [("info", "REPLAY repo sweep — {} functions tracked".format(len(functions)))],
+    }
+
+    def aggregate():
+        st["killed"] = sum(f["killed"] for f in functions)
+        st["total"] = sum(f["total"] for f in functions)
+        st["tokens"] = sum(f["tokens"] for f in functions)
+        st["kill_rate"] = st["killed"] / st["total"] if st["total"] else 0.0
+
+    def short(name):
+        return name.split("::")[-1]
+
+    screen = Screen(live=sys.stdout.isatty(), snapshot=opts.snapshot)
+    with screen:
+        screen.commit(st)
+        if screen.live:
+            time.sleep(0.4)
+        for i, t in enumerate(targets):
+            st["active"] = i
+            f = functions[i]
+            st["events"].append(("info", "▶ hardening {}".format(short(t["name"]))))
+            for e in t["metrics"]:
+                if e.get("event") == "run_finished":
+                    f["kill_rate"] = e.get("kill_rate", f["kill_rate"])
+                    continue
+                prev_tokens = f["tokens"]
+                f["tier"] = e.get("tier", f["tier"])
+                f["total"] = e.get("total_mutants", f["total"])
+                f["killed"] = e.get("killed_cumulative", f["killed"])
+                f["kill_rate"] = e.get("kill_rate", f["kill_rate"])
+                f["tokens"] = e.get("cumulative_tokens", prev_tokens)
+                for kid in (e.get("killed_this_round") or []):
+                    st["events"].append(("kill", "{}: KILLED {}".format(short(t["name"]), kid)))
+                aggregate()
+                st["token_history"].append(max(0, f["tokens"] - prev_tokens))
+                st["kill_series"].append(st["kill_rate"])
+                st["status"] = "{} — iter {} ({} tier)".format(short(t["name"]), e.get("iteration", "?"), e.get("tier", "?"))
+                screen.commit(st)
+                if screen.live:
+                    time.sleep(opts.delay)
+            f["done"] = True
+            st["done_count"] += 1
+            aggregate()
+            st["events"].append(("done", "✓ {} hardened: {}/{} bugs".format(short(t["name"]), f["killed"], f["total"])))
+            screen.commit(st)
+            if screen.live:
+                time.sleep(max(opts.delay, 0.3))
+        st["done"] = True
+        st["events"].append(("done", "repo sweep complete — {} bugs caught across {} functions / {:,} tokens".format(
+            st["killed"], len(functions), st["tokens"])))
+        screen.commit(st)
+        if screen.live:
+            time.sleep(0.5)
+
+
 SPEEDS = {"slow": 1.1, "normal": 0.6, "fast": 0.25}
 
 
@@ -694,7 +1020,8 @@ def main():
     global USE_COLOR
     p = argparse.ArgumentParser(description="Adversarial Arena — live terminal kill-board.")
     p.add_argument("--live", action="store_true", help="use real LLM calls instead of the offline simulation")
-    p.add_argument("--speed", choices=list(SPEEDS), default="normal", help="demo pacing (default: normal)")
+    p.add_argument("--replay", nargs="+", metavar="LOG", default=None, help="DEMO MODE: speedrun previous main.py run(s). One file = that function; a directory or several files = repo-wide leaderboard of all functions.")
+    p.add_argument("--speed", choices=list(SPEEDS), default=None, help="demo pacing (default: normal live, fast on --replay)")
     p.add_argument("--delay", type=float, default=None, help="seconds between iterations (overrides --speed)")
     p.add_argument("--snapshot", action="store_true", help="print settled frames instead of redrawing in place")
     p.add_argument("--no-color", action="store_true", help="disable ANSI color")
@@ -713,10 +1040,34 @@ def main():
 
     if opts.no_color:
         USE_COLOR = False
-    opts.delay = opts.delay if opts.delay is not None else SPEEDS[opts.speed]
+    speed = opts.speed or ("fast" if opts.replay else "normal")
+    opts.delay = opts.delay if opts.delay is not None else SPEEDS[speed]
+
+    # Expand --replay into a concrete list of log files (a dir -> its run_*.jsonl).
+    replay_logs = None
+    if opts.replay:
+        import glob
+        import os
+        expanded = []
+        for item in opts.replay:
+            if os.path.isdir(item):
+                expanded += sorted(glob.glob(os.path.join(item, "run_*.jsonl")))
+            elif any(ch in item for ch in "*?["):
+                expanded += sorted(glob.glob(item))
+            else:
+                expanded.append(item)
+        replay_logs = [p for p in expanded if os.path.isfile(p)]
+        if not replay_logs:
+            raise SystemExit("no run logs matched {}".format(opts.replay))
 
     try:
-        run(opts)
+        if replay_logs and len(replay_logs) > 1:
+            replay_repo(opts, replay_logs)
+        elif replay_logs:
+            opts.replay = replay_logs[0]      # single-file replay expects a path string
+            replay(opts)
+        else:
+            run(opts)
     except KeyboardInterrupt:
         sys.stdout.write("\033[?25h\n")
         sys.stdout.flush()

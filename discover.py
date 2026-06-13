@@ -187,6 +187,29 @@ def _complexity(span: str) -> int:
     return len(body_lines) + 2 * len(BRANCH.findall(span))
 
 
+def _package_context(root: Path, path: Path) -> Optional[dict]:
+    """Import context for `path` if it lives in a Python package, else None.
+
+    Not-self-contained functions (those that need sibling/relative imports) can't be
+    loaded as a lone file — they have to be imported by their real dotted path inside
+    their package. We find that by walking up while each dir has an `__init__.py`: the
+    topmost such dir is the package, its parent is the import root. Returns the context
+    runner._build_sandbox understands: {import_root, module, target_rel}. None means the
+    file isn't in a package (so relative imports wouldn't be legal anyway) — the caller
+    then falls back to standalone mode.
+    """
+    pkg_dir = path.parent;
+    if not (pkg_dir / "__init__.py").exists():
+        return None
+    top = pkg_dir;
+    while (top.parent / "__init__.py").exists():
+        top = top.parent;
+    import_root = top.parent;
+    rel = path.relative_to(import_root);
+    module = ".".join(rel.with_suffix("").parts);
+    return {"import_root": str(import_root), "module": module, "target_rel": str(rel)};
+
+
 def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
     """Let the strategy model order the eligible functions — the agent picks what to harden.
 
@@ -198,6 +221,7 @@ def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
     head = pool[:60];  # cap the menu so the prompt stays small
     listing = "\n".join("{}. {}::{}".format(i, c["rel"], c["name"]) for i, c in enumerate(head));
     prompt = (
+<<<<<<< Updated upstream
         "You are choosing which functions in the repo `{}` are most worth hardening with\n"
         "adversarial mutation tests. Favor functions with real logic and edge cases — parsing,\n"
         "comparison, validation, math, encoding, security-relevant behavior. Rank trivial\n"
@@ -205,6 +229,14 @@ def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
         "<functions>\n{}\n</functions>\n\n"
         "Rank ALL of them. Return ONLY a JSON array of the item numbers, best first, "
         "e.g. [3, 0, 7]."
+=======
+        "You are choosing which functions in the repo `{}` are most worth hardening with "
+        "adversarial mutation tests. Favor functions with real logic and edge cases "
+        "(parsing, comparison, validation, math, encoding, security-relevant behavior); "
+        "rank trivial getters/wrappers/formatters last.\n\n"
+        "Eligible functions:\n{}\n\n"
+        "Return ONLY a JSON array of the item numbers, best first, e.g. [3, 0, 7]."
+>>>>>>> Stashed changes
     ).format(repo, listing);
     order: List[int] = [];
     try:
@@ -267,24 +299,39 @@ def discover_targets(
             if not names:
                 continue
             compiles = acquire._compiles_fn(language);
-            # One standalone compile decides the whole file: if it loads, its top-level
-            # functions are importable; if it needs sibling imports, skip it.
-            if not any(compiles(src, n) for n in names[:3]):
+            probe = names[:3];
+            # One compile decides the whole file. Try the cheap standalone harness first;
+            # if the file needs sibling/relative imports, retry inside a reconstructed
+            # copy of its package (Python only) — that lifts the "self-contained only"
+            # ceiling without installing the repo's third-party dependencies.
+            if any(compiles(src, n) for n in probe):
+                ctx = None;
+            elif language == "python":
+                pctx = _package_context(root, path);
+                if pctx and any(compiles(src, n, context=pctx) for n in probe):
+                    ctx = pctx;
+                else:
+                    continue
+            else:
                 continue
             rel = str(path.relative_to(root));
             for name in names:
                 candidates.append({
-                    "rel": rel, "src": src, "language": language, "name": name,
+                    "rel": rel, "src": src, "language": language, "name": name, "context": ctx,
                     "score": _complexity(_function_span(src, name, language)),
                 });
         candidates = _llm_rank(repo, candidates, verbose);
-        _log(verbose, "{} eligible function(s); ranked by the strategy model".format(len(candidates)));
+        pkg_count = sum(1 for c in candidates if c.get("context"));
+        extra = " ({} via package-context import)".format(pkg_count) if pkg_count else "";
+        _log(verbose, "{} eligible function(s){}; ranked by the strategy model".format(len(candidates), extra));
 
-        # Pass 2: generate mutants best-first, in parallel. We submit the top
-        # candidates needed to cover max_targets (with 2x slack for failures),
-        # then keep results in rank order. With max_targets=0 we run them all.
+        # Pass 2: generate mutants best-first, in parallel. Mutant-gen can fail on an
+        # individual candidate (a malformed response, a function the model can't mutate
+        # cleanly), so we attempt well beyond max_targets and keep the best-ranked
+        # successes — a couple of duds at the top of the ranking must not sink the run.
+        # With max_targets=0 we run them all.
         if max_targets:
-            planned = min(max_targets * 2, len(candidates));
+            planned = min(max(max_targets * 4, max_targets + 6), len(candidates));
         else:
             planned = len(candidates);
         workers = min(DISCOVER_WORKERS, planned);
@@ -296,13 +343,13 @@ def discover_targets(
             fn = "{}::{}".format(c["rel"], c["name"]);
             started = time.perf_counter();
             try:
-                mutants = acquire.generate_mutants(c["src"], c["name"], c["language"], mutants_per);
+                mutants = acquire.generate_mutants(c["src"], c["name"], c["language"], mutants_per, context=c.get("context"));
                 dt = time.perf_counter() - started;
                 if not mutants:
                     _log(verbose, "    ✗ {} (no valid mutants in {:.1f}s)".format(fn, dt));
                     return None
                 _log(verbose, "    ✓ {}  {} mutants in {:.1f}s".format(fn, len(mutants), dt));
-                return acquire.Target(c["src"], mutants, c["language"], c["name"])
+                return acquire.Target(c["src"], mutants, c["language"], c["name"], context=c.get("context"))
             except Exception as exc:
                 _log(verbose, "    ✗ {} skipped after {:.1f}s (mutant-gen failed: {})".format(
                     fn, time.perf_counter() - started, exc));

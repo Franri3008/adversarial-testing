@@ -153,7 +153,13 @@ def _complete_strategy(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[
         ];
     else:
         content = prompt;
-    response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": content}], **params);
+    # Stream always. Mutant generation asks for n full-file copies, so max_tokens can be
+    # tens of thousands; a non-streaming create() then raises "Streaming is required for
+    # operations that may take longer than 10 minutes" before it ever calls the API.
+    # Streaming sidesteps that hard cap and is the recommended path for long outputs;
+    # get_final_message() reassembles the whole response (and its usage) for us.
+    with client.messages.stream(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": content}], **params) as stream:
+        response = stream.get_final_message();
     text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text");
     usage = response.usage;
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0);
