@@ -3,7 +3,18 @@ import sys
 from typing import Dict, List, Optional
 
 from generator import generate_test
-from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
+from harness import (
+    JsonlLogger,
+    compute_kill_rate,
+    is_plateau,
+    iteration_completed,
+    make_log_entry,
+    mutant_records,
+    mutants_generated,
+    run_baseline,
+    run_finished,
+    run_started,
+)
 
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
@@ -84,6 +95,13 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
 
     logger = JsonlLogger(log_path)
     total = len(mutants)
+    target = {
+        "function": function_name or "-",
+        "language": language,
+        "label": label,
+    }
+    logger.append(run_started(logger.run_id, "harden", target, reference_src=reference_src))
+    logger.append(mutants_generated(logger.run_id, "harden", mutants))
 
     baseline = run_baseline(reference_src, mutants, gen_fn, run_and_check)
     head = "[{}] ".format(label) if label else ""
@@ -103,12 +121,12 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
     strategy_model = ""
     bulk_model = ""
     mutant_round = 0
+    stop_reason = "max_iterations"
 
     def _over_budget():
         return (COST_CAP_USD and cumulative_cost >= COST_CAP_USD) or (TOKEN_CAP and cumulative_tokens >= TOKEN_CAP)
 
     print("iter  tier      cum_tokens   cost$    kill_rate  killed_this_round")
-    stop = "max-iterations"
     for iteration in range(1, MAX_ITERATIONS + 1):
         role = ROLE_ORDER[role_idx]
         gen = gen_fn(reference_src, surviving, role=role)
@@ -129,7 +147,22 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
         kill_rate = compute_kill_rate(len(killed_total), total)
         kill_rates.append(kill_rate)
 
-        entry = make_log_entry(iteration, cumulative_tokens, kill_rate, killed_this_round)
+        killed_mutants = [m for m in mutants if m["id"] in set(killed_this_round)]
+        entry = iteration_completed(
+            logger.run_id,
+            "harden",
+            iteration,
+            cumulative_tokens,
+            kill_rate,
+            killed_this_round,
+            surviving,
+            cost_usd=cumulative_cost,
+            tier=role,
+            generated_test_src=gen["test_src"],
+            reference_passed=result["reference_passed"],
+            killed_mutants=mutant_records(killed_mutants, status="killed"),
+        )
+        entry.update(make_log_entry(iteration, cumulative_tokens, kill_rate, killed_this_round))
         entry["tier"] = role
         entry["cost_usd"] = round(cumulative_cost, 4)
         entry["mutant_round"] = mutant_round
@@ -141,7 +174,7 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
 
         # STOP: budget caps (the non-negotiable terminal condition).
         if _over_budget():
-            stop = "budget-cap"
+            stop_reason = "budget_cap"
             print("budget cap reached -> stop")
             break
 
@@ -149,7 +182,7 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
         # in the adversary to invent new bugs the suite misses — the arms race continues.
         if not surviving:
             if mutant_round >= MUTANT_ROUNDS:
-                stop = "rounds-exhausted"
+                stop_reason = "rounds_exhausted"
                 print("all {} mutants killed; adversary budget ({} rounds) spent -> stop".format(total, MUTANT_ROUNDS))
                 break
             mutant_round += 1
@@ -160,8 +193,9 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
             cumulative_tokens += adv["tokens"]
             cumulative_cost += adv.get("cost", 0.0)
             strategy_model = adv.get("model", strategy_model) or strategy_model
+            logger.append(mutants_generated(logger.run_id, "harden", adv["mutants"], iteration=iteration))
             if not adv["mutants"]:
-                stop = "adversary-defeated"
+                stop_reason = "adversary_defeated"
                 print("adversary found NO surviving mutant -> suite is robust, plateau at 100%")
                 break
             all_mutants.extend(adv["mutants"])
@@ -182,14 +216,27 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
                     role, len(surviving), ROLE_ORDER[role_idx]))
                 kill_rates = []  # give the stronger tier a fresh plateau window
             else:
-                stop = "defender-plateau"
+                stop_reason = "defender_plateau"
                 print("plateau on strongest tier '{}' -> stop ({} unkilled)".format(
                     role, len(surviving)))
                 break
 
     final = compute_kill_rate(len(killed_total), total)
+    logger.append(run_finished(
+        logger.run_id,
+        "harden",
+        "completed" if final >= 1.0 else "stopped",
+        stop_reason,
+        cumulative_tokens,
+        kill_rate=final,
+        cost_usd=cumulative_cost,
+        total_mutants=total,
+        mutant_rounds=mutant_round,
+        killed_mutant_ids=sorted(killed_total),
+        surviving_mutants=mutant_records(surviving, status="surviving"),
+    ))
     print("{}final: killed {}/{} mutants over {} adversary round(s), cost=${:.4f} ({})".format(
-        head, len(killed_total), total, mutant_round, cumulative_cost, stop))
+        head, len(killed_total), total, mutant_round, cumulative_cost, stop_reason))
     return {
         "entries": logger.entries,
         "suite_sources": suite_sources,
@@ -199,11 +246,11 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
         "total": total,
         "mutant_rounds": mutant_round,
         "killed_total": len(killed_total),
-        "stop": stop,
         "language": language,
         "function_name": function_name,
         "strategy_model": strategy_model or "-",
         "bulk_model": bulk_model or "-",
+        "stop_reason": stop_reason,
     }
 
 
@@ -256,6 +303,7 @@ def main() -> None:
         "surviving": res["surviving"],
         "mutant_rounds": res.get("mutant_rounds", 0),
         "killed_total": res.get("killed_total", 0),
+        "stop_reason": res.get("stop_reason", "-"),
     }
     report_path = report.write_report(meta, res["entries"], res["suite_sources"], baseline=res["baseline"])
     print("report at {}".format(report_path))
