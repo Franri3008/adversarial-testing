@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -32,23 +32,59 @@ def _log(verbose: bool, message: str) -> None:
         print("[discover] " + message);
 
 
+def _cache_root() -> Path:
+    """Where cached clones live; override with ADVERSARIAL_REPO_CACHE."""
+    base = os.environ.get("ADVERSARIAL_REPO_CACHE");
+    if base:
+        return Path(base).expanduser();
+    return Path.home() / ".cache" / "adversarial-testing" / "repos"
+
+
+def _reset_cached_repo(path: Path) -> bool:
+    """Drop any local changes and reset a cached clone to its primary branch.
+
+    Returns True if `path` is a usable git checkout that was reset, False otherwise
+    (caller should then clone fresh). A shallow clone has its default branch checked
+    out, so `reset --hard` + `clean -fd` restores it to the downloaded state.
+    """
+    if not (path / ".git").is_dir():
+        return False
+    for cmd in (["git", "reset", "--hard"], ["git", "clean", "-fd"]):
+        proc = subprocess.run(cmd, cwd=str(path), capture_output=True, text=True, timeout=120);
+        if proc.returncode != 0:
+            return False
+    return True
+
+
 @contextmanager
 def materialize_repo(repo: str) -> Iterator[Path]:
-    """Yield a local directory for `repo` — the dir itself if local, else a shallow clone."""
+    """Yield a local directory for `repo` — the dir itself if local, else a cached shallow clone.
+
+    Clones are cached on disk under _cache_root(), so a repo downloaded once is reused: on
+    reuse we just drop local changes and reset to its primary branch instead of re-cloning.
+    """
     local = Path(repo).expanduser();
     if local.is_dir():
         yield local;
         return
     repo_id = acquire._parse_repo(repo);
-    with tempfile.TemporaryDirectory(prefix="discover-") as tmp:
-        clone_url = "https://github.com/{}.git".format(repo_id);
-        proc = subprocess.run(
-            ["git", "clone", "--depth", "1", clone_url, tmp],
-            capture_output=True, text=True, timeout=240,
-        );
-        if proc.returncode != 0:
-            raise RuntimeError("git clone failed for {}: {}".format(repo_id, proc.stderr.strip()[:200]));
-        yield Path(tmp)
+    dest = _cache_root() / repo_id.replace("/", "__");
+    if _reset_cached_repo(dest):
+        yield dest;
+        return
+    # Not cached yet (or a broken checkout) — clone fresh into the cache.
+    if dest.exists():
+        shutil.rmtree(dest, ignore_errors=True);
+    dest.parent.mkdir(parents=True, exist_ok=True);
+    clone_url = "https://github.com/{}.git".format(repo_id);
+    proc = subprocess.run(
+        ["git", "clone", "--depth", "1", clone_url, str(dest)],
+        capture_output=True, text=True, timeout=240,
+    );
+    if proc.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True);
+        raise RuntimeError("git clone failed for {}: {}".format(repo_id, proc.stderr.strip()[:200]));
+    yield dest
 
 
 def _is_test_file(name: str) -> bool:
