@@ -1,5 +1,9 @@
 # adversarial-testing
 
+<p align="center">
+  <img src="docs/demo.png" alt="Demo screenshot" width="900">
+</p>
+
 An adversarial test-generation loop for real code. The model proposes tests, but the
 score comes from the runner: a mutant is killed only when the generated test passes on
 the reference implementation and fails on the broken implementation. No LLM judges the
