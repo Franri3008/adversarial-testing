@@ -94,8 +94,9 @@ def _vitest_passes(repo: Path, impl_src: str, test_src: str) -> bool:
 
 
 def run_and_check(
-    test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
+    test_src: str, reference_src: str, mutants: List[Dict[str, Any]], function_name=None
 ) -> Dict[str, Any]:
+    # function_name accepted for parity with the Python runner; unused (TS imports by name).
     if not mutants:
         return {"reference_passed": True, "killed_mutant_ids": []}
 
