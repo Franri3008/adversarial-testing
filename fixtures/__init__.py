@@ -1,13 +1,14 @@
 """Active fixture selector.
 
-Pick a fixture via env: LOOPIFY_FIXTURE=toy (default, Python) or duration_ts (TypeScript).
+Pick a fixture via env: LOOPIFY_FIXTURE=toy (default, Python) or duration_ts
+(TypeScript). Legacy FIXTURE is also accepted.
 Each fixture module exposes REFERENCE_SRC and MUTANTS, and optionally LANGUAGE
 ("python" default) and FUNCTION_NAME.
 """
 import importlib
 import os
 
-_name = os.environ.get("LOOPIFY_FIXTURE", "toy")
+_name = os.environ.get("LOOPIFY_FIXTURE") or os.environ.get("FIXTURE", "toy")
 _mod = importlib.import_module(f"fixtures.{_name}")
 
 REFERENCE_SRC = _mod.REFERENCE_SRC

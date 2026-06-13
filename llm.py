@@ -53,12 +53,12 @@ CLAUDE_UNSUPPORTED_KWARGS = ("temperature", "top_p", "top_k");
 # Backend transport. "cli" runs the local `claude -p` (uses the machine's Claude Code
 # auth/gateway — no SDK install, no API key needed), which is what makes this loop
 # runnable on a laptop out of the box. "sdk" uses the original anthropic/openai paths.
-BACKEND = os.environ.get("LOOPIFY_BACKEND", "cli");
+BACKEND = os.environ.get("BACKEND", "cli");
 CLI_MODELS = {
-    "strategy": os.environ.get("LOOPIFY_STRATEGY_MODEL", "opus"),
-    "bulk": os.environ.get("LOOPIFY_BULK_MODEL", "haiku"),
+    "strategy": os.environ.get("STRATEGY_MODEL", "opus"),
+    "bulk": os.environ.get("BULK_MODEL", "haiku"),
 };
-CLI_TIMEOUT = int(os.environ.get("LOOPIFY_CLI_TIMEOUT", "180"));
+CLI_TIMEOUT = int(os.environ.get("CLI_TIMEOUT", "180"));
 
 
 def resolve_model(role: str) -> str:

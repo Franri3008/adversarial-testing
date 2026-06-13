@@ -68,7 +68,7 @@ def compiles(impl_src: str, function_name: str) -> bool:
     mutant never counts as a false 'kill'.
     """
     smoke = f"def test_loads({function_name}):\n    assert callable({function_name})\n"
-    with tempfile.TemporaryDirectory(prefix="loopify-smoke-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="mut-smoke-") as tmp:
         return _pytest_passes(Path(tmp), impl_src, smoke, function_name)
 
 
@@ -80,7 +80,7 @@ def run_and_check(
 
     fn = _function_name(reference_src)
 
-    with tempfile.TemporaryDirectory(prefix="loopify-mut-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="mut-") as tmp:
         workdir = Path(tmp)
 
         # 1) The test must PASS on the correct reference, else it's a bad test and

@@ -25,7 +25,7 @@ VITEST_TIMEOUT = 60  # seconds per implementation
 def _env() -> Dict[str, str]:
     env = dict(os.environ)
     # Optional: let callers pin a Node toolchain dir without editing PATH globally.
-    node_bin = os.environ.get("LOOPIFY_NODE_BIN")
+    node_bin = os.environ.get("NODE_BIN")
     if node_bin:
         env["PATH"] = f"{node_bin}:{env.get('PATH', '')}"
     return env

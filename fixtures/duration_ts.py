@@ -5,7 +5,7 @@ enforces a hard 30-minute (1800s) cap — a "shields-down" security invariant in
 (there is no way to disable the auto-restore timer). The mutants below each break one real
 behavior; M2 violates the security cap, which a good adversarial test must catch.
 
-Used by the loop when LOOPIFY_FIXTURE=duration_ts. Verified with the standalone vitest
+Used by the loop when FIXTURE=duration_ts. Verified with the standalone vitest
 runner (runner_ts.py), so the same generated test runs against the reference and each mutant.
 """
 
