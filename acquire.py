@@ -1,7 +1,7 @@
 """Acquire a mutation-testing target from a real repo, no fixture authoring.
 
-Given a repo URL + file path + function name, this:
-  1. fetches just that file via `gh api` (no clone),
+Given a repo (a local checkout path OR a GitHub URL) + file path + function name, this:
+  1. reads that file — from local disk if `repo` is a directory, else via `gh api` (no clone),
   2. uses the file as the reference implementation,
   3. asks the strategy model to generate N realistic single-bug mutants,
   4. validates them — drops duplicates, no-ops, and anything that does not compile
@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import llm
@@ -49,6 +50,15 @@ def _language_for(path: str) -> str:
 
 
 def fetch_file(repo_url: str, path: str) -> str:
+    # Local checkout: if `repo` is an existing directory, read straight from disk
+    # (no network, no clone) — handy when you already have the repo locally.
+    local = Path(repo_url).expanduser()
+    if local.is_dir():
+        f = local / path
+        if not f.exists():
+            raise RuntimeError(f"'{path}' not found in local repo {local}")
+        return f.read_text()
+
     repo = _parse_repo(repo_url)
     proc = subprocess.run(
         ["gh", "api", f"repos/{repo}/contents/{path}", "--jq", ".content"],
