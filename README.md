@@ -412,3 +412,7 @@ python bench.py --update   # accept intentional metric changes
 - **Backend resilience:** keep repo discovery useful when a live strategy backend is down.
 - **Higher-fidelity repo runners:** support more real-project test runners beyond the current
   pytest/vitest paths.
+
+## License
+
+Released under the [MIT License](LICENSE).
