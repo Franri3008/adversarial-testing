@@ -34,10 +34,15 @@ def _build_prompt_python(reference_src: str, fn: str, surviving: List[Dict[str, 
     ).format(fn=fn, clues=_clues(surviving), ref=reference_src)
 
 
-def _build_prompt_typescript(reference_src: str, fn: str, surviving: List[Dict[str, Any]]) -> str:
+def _build_prompt_typescript(
+    reference_src: str,
+    fn: str,
+    surviving: List[Dict[str, Any]],
+    import_path: str = "./impl",
+) -> str:
     return (
         "You are writing an adversarial vitest test (TypeScript) for mutation testing.\n"
-        "Import the function under test with `import {{ {fn} }} from \"./impl\";` and import "
+        "Import the function under test with `import {{ {fn} }} from \"{import_path}\";` and import "
         "`test` and `expect` from \"vitest\". Do not redefine the function.\n\n"
         "Write ONE test with several assertions that PASS on the correct implementation but "
         "would FAIL on implementations exhibiting these bugs:\n"
@@ -47,7 +52,7 @@ def _build_prompt_typescript(reference_src: str, fn: str, surviving: List[Dict[s
         "Correct reference implementation (for behavior, do not copy into the test):\n"
         "```typescript\n{ref}\n```\n\n"
         "Output ONLY the test code in a single ```typescript code block. No prose."
-    ).format(fn=fn, clues=_clues(surviving), ref=reference_src)
+    ).format(fn=fn, import_path=import_path, clues=_clues(surviving), ref=reference_src)
 
 
 def _extract_code(text: str) -> str:
@@ -62,10 +67,13 @@ def generate_test(
     role: str = "bulk",
     language: str = "python",
     function_name: Optional[str] = None,
+    test_import_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     if language == "typescript":
         fn = _ts_function_name(reference_src, function_name)
-        prompt = _build_prompt_typescript(reference_src, fn, surviving_mutants)
+        prompt = _build_prompt_typescript(
+            reference_src, fn, surviving_mutants, test_import_path or "./impl"
+        )
     else:
         fn = function_name or _python_function_name(reference_src)
         prompt = _build_prompt_python(reference_src, fn, surviving_mutants)

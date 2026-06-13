@@ -1,18 +1,18 @@
 import os
 import sys
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from generator import generate_test
 from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
 
-MAX_ITERATIONS = int(os.environ.get("LOOPIFY_MAX_ITERATIONS", "25"))
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
 
 # Two-tier stacked loop: start cheap (bulk), escalate to the smart model (strategy)
 # when the cheap tier stops making progress. Budget caps are the terminal stop.
 ROLE_ORDER = ["bulk", "strategy"]
-COST_CAP_USD = float(os.environ.get("LOOPIFY_COST_CAP", "5.0"))      # 0 disables
-TOKEN_CAP = int(os.environ.get("LOOPIFY_TOKEN_CAP", "0"))            # 0 disables
+COST_CAP_USD = float(os.environ.get("COST_CAP", "5.0"))      # 0 disables
+TOKEN_CAP = int(os.environ.get("TOKEN_CAP", "0"))            # 0 disables
 
 
 def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
@@ -26,7 +26,7 @@ def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
 
 def _resolve_target():
     """CLI mode (repo=/file=/function=) acquires a target from a real repo;
-    otherwise fall back to a built-in fixture (LOOPIFY_FIXTURE)."""
+    otherwise fall back to a built-in fixture (FIXTURE)."""
     kwargs = _parse_kwargs(sys.argv[1:])
     if kwargs.get("repo") or kwargs.get("file"):
         from acquire import acquire_target
@@ -36,15 +36,24 @@ def _resolve_target():
             raise SystemExit(f"CLI mode needs: repo=, file=, function= (missing: {missing})")
         n = int(kwargs.get("mutants", "5"))
         t = acquire_target(kwargs["repo"], kwargs["file"], kwargs["function"], n)
-        return t.reference_src, t.mutants, t.language, t.function_name
+        return t.reference_src, t.mutants, t.language, t.function_name, None, None
 
     import fixtures
 
-    return fixtures.REFERENCE_SRC, fixtures.MUTANTS, fixtures.LANGUAGE, fixtures.FUNCTION_NAME
+    return (
+        fixtures.REFERENCE_SRC,
+        fixtures.MUTANTS,
+        fixtures.LANGUAGE,
+        fixtures.FUNCTION_NAME,
+        getattr(fixtures, "RUNNER", None),
+        getattr(fixtures, "TEST_IMPORT_PATH", None),
+    )
 
 
-def _get_runner(language: str):
-    if language == "typescript":
+def _get_runner(language: str, runner: Optional[str] = None):
+    if runner == "typescript_repo":
+        from runner_repo_ts import run_and_check
+    elif language == "typescript":
         from runner_ts import run_and_check
     else:
         from runner import run_and_check
@@ -52,12 +61,19 @@ def _get_runner(language: str):
 
 
 def main() -> None:
-    reference_src, mutants, language, function_name = _resolve_target()
-    run_and_check = _get_runner(language)
+    reference_src, mutants, language, function_name, runner, test_import_path = _resolve_target()
+    run_and_check = _get_runner(language, runner)
 
     # Bind language/function so generation works for both fixture and CLI targets.
     def gen_fn(ref, surviving, role="bulk"):
-        return generate_test(ref, surviving, role=role, language=language, function_name=function_name)
+        return generate_test(
+            ref,
+            surviving,
+            role=role,
+            language=language,
+            function_name=function_name,
+            test_import_path=test_import_path,
+        )
 
     logger = JsonlLogger(LOG_PATH)
     total = len(mutants)
