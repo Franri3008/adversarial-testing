@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1");
 
 from fixer import generate_fix
-from fixtures.buggy import BUGGY_SRC, MUTANTS as SEED_MUTANTS, PLANTED_BUGS, REFERENCE_SRC
+from fixtures.buggy import BUGGY_SRC, MUTANTS as SEED_MUTANTS, ONESHOT_SRC, PLANTED_BUGS, REFERENCE_SRC
 from generator import generate_test
 from harness import JsonlLogger, compute_kill_rate
 import llm
@@ -168,23 +168,23 @@ def _grade(code: str, buggy_src: str, planted_bugs: List[Dict[str, Any]]) -> int
     return fixed
 
 
-def _oneshot_baseline(buggy_src: str, oracle_src: str, planted_bugs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _oneshot_baseline(buggy_src: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], oneshot_src: Optional[str] = None) -> Dict[str, Any]:
     combined = {"description": "Fix every defect so the function behaves correctly.", "target_name": _function_name(buggy_src)};
     suite = _suite_text([_mangle(bug["stub_test_src"], bug["id"]) for bug in planted_bugs]);
-    fix = generate_fix(buggy_src, combined, suite, oracle_src=oracle_src, stub_fixed_src=oracle_src);
+    fix = generate_fix(buggy_src, combined, suite, oracle_src=oracle_src, stub_fixed_src=oneshot_src or oracle_src);
     fixed_src = fix["fixed_src"];
     tokens = _token_count(fix["tokens"]);
     fixed_count = _grade(fixed_src, buggy_src, planted_bugs);
     return {"bugs_fixed": fixed_count, "total_bugs": len(planted_bugs), "cumulative_tokens": tokens}
 
 
-def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], start_tokens: int = 0, verbose: bool = True) -> Dict[str, Any]:
+def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], start_tokens: int = 0, verbose: bool = True, oneshot_src: Optional[str] = None) -> Dict[str, Any]:
     buggy_src = code;
     seed_bugs = [{"id": bug["id"], "description": bug["description"], "target_name": bug["target_name"]} for bug in planted_bugs];
     stub_tests = {bug["id"]: bug["stub_test_src"] for bug in planted_bugs};
     stub_fixes = {bug["id"]: bug["stub_fixed_src"] for bug in planted_bugs};
 
-    baseline = _oneshot_baseline(buggy_src, oracle_src, planted_bugs);
+    baseline = _oneshot_baseline(buggy_src, oracle_src, planted_bugs, oneshot_src=oneshot_src);
     if verbose:
         print("one-shot baseline: fixed {}/{} bugs, tokens {}".format(baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
 
@@ -257,7 +257,7 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
 
 
 def main() -> None:
-    result = run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS);
+    result = run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS, oneshot_src=ONESHOT_SRC);
     logger = JsonlLogger(LOG_PATH);
     with open(BASELINE_PATH, "w") as handle:
         json.dump(result["baseline"], handle);

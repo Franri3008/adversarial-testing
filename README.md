@@ -42,6 +42,7 @@ plus five mutants — `M1_no_sort`, `M2_strict_overlap`, `M3_overwrite_end`,
 ## Requirements
 
 - Python 3.9+ and `pytest`
+- `matplotlib` — optional, only for rendering `repair_curve.png` (`pip install matplotlib`)
 - A model backend — pick one:
   - **CLI (default, zero-config):** the [`claude`](https://docs.claude.com/claude-code) CLI,
     logged in. Uses your local Claude auth — no API key, no SDK install.
@@ -146,14 +147,20 @@ code" (a genuine red→green).
 ```bash
 pip install pytest          # plus the `claude` CLI logged in (default backend)
 python repair_main.py
+pip install matplotlib       # only needed for the plot below
 python repair_plot.py        # optional: render repair_curve.png
 ```
+
+`repair_plot.py` renders a proper labeled, dual-axis chart when **matplotlib** is
+installed (`pip install matplotlib`). Without it, the script falls back to a tiny built-in
+PNG writer that draws the curves but no axis tick labels — install matplotlib for the
+readable version.
 
 Deterministic offline run (stub backend, no model calls):
 
 ```
 $ LOOPIFY_BACKEND=sdk python repair_main.py
-one-shot baseline: fixed 3/3 bugs, tokens 269
+one-shot baseline: fixed 1/3 bugs, tokens 269
 iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round
         1               1716           1      0.333  B1_zero_total
         2               3209           2      0.667  B2_clamp_high
@@ -161,6 +168,12 @@ iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round
 no further bugs reported at iteration 4
 loop fixed 3/3 planted bugs (graded), 3 tests in suite, log at repair_run.jsonl
 ```
+
+This is the case for the loop: a single all-at-once "fix every defect" attempt patches
+the obvious `ZeroDivisionError` crash but misses the two subtler boundary clamps — **1/3
+bugs** for 269 tokens. The iterative loop's find → test → verify cycle closes all **3/3**,
+trading more tokens for complete repair. In `repair_curve.png` the red ✕ (one-shot) sits
+at 1 bug while the blue line climbs to 3.
 
 Two metrics climb together: **bugs fixed** (repair progress) and **suite kill-rate** (test
 quality). Progress is appended to `repair_run.jsonl`, with the one-shot baseline in
