@@ -9,15 +9,19 @@ Returns fixture-shaped targets the existing loop already understands, one per fu
 """
 from __future__ import annotations
 
+import logging
+import json
 import os
 import re
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import acquire
+import llm
 
 SUPPORTED = {".py", ".ts", ".tsx"}
 SKIP_DIRS = {"node_modules", "dist", "build", "out", "__pycache__", ".venv", "venv",
@@ -27,9 +31,36 @@ TS_FN = re.compile(r"export\s+(?:async\s+)?function\s+(\w+)\s*\(")
 BRANCH = re.compile(r"(\bif\b|\bfor\b|\bwhile\b|\belif\b|\bcase\b|\bcatch\b|\bexcept\b|\bswitch\b|\breturn\b|\?\.|&&|\|\|)")
 
 
+def _build_logger() -> logging.Logger:
+    """A pretty, loggable channel for discover output.
+
+    Console gets a timestamped, tagged line; set ADVERSARIAL_LOG_FILE to also append every
+    line to a file. Configured once and idempotent so importing this module twice is safe.
+    """
+    log = logging.getLogger("adversarial.discover");
+    if getattr(log, "_configured", False):
+        return log
+    log.setLevel(logging.INFO);
+    log.propagate = False;
+    fmt = logging.Formatter("%(asctime)s [discover] %(message)s", datefmt="%H:%M:%S");
+    console = logging.StreamHandler();
+    console.setFormatter(fmt);
+    log.addHandler(console);
+    log_file = os.environ.get("ADVERSARIAL_LOG_FILE");
+    if log_file:
+        file_handler = logging.FileHandler(Path(log_file).expanduser(), encoding="utf-8");
+        file_handler.setFormatter(logging.Formatter("%(asctime)s [discover] %(message)s"));
+        log.addHandler(file_handler);
+    log._configured = True;  # type: ignore[attr-defined]
+    return log
+
+
+logger = _build_logger()
+
+
 def _log(verbose: bool, message: str) -> None:
     if verbose:
-        print("[discover] " + message);
+        logger.info(message);
 
 
 def _cache_root() -> Path:
@@ -152,6 +183,51 @@ def _complexity(span: str) -> int:
     return len(body_lines) + 2 * len(BRANCH.findall(span))
 
 
+def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
+    """Let the strategy model order the eligible functions — the agent picks what to harden.
+
+    The complexity score is only a pre-filter (cap the menu) and the fallback when no LLM is
+    reachable. The actual choice is the model's: it favors functions with real logic / edge
+    cases and sinks trivial wrappers, which is what the heuristic could not judge.
+    """
+    pool = sorted(candidates, key=lambda c: c["score"], reverse=True);
+    head = pool[:60];  # cap the menu so the prompt stays small
+    listing = "\n".join("{}. {}::{}".format(i, c["rel"], c["name"]) for i, c in enumerate(head));
+    prompt = (
+        "You are choosing which functions in the repo `{}` are most worth hardening with "
+        "adversarial mutation tests. Favor functions with real logic and edge cases "
+        "(parsing, comparison, validation, math, encoding, security-relevant behavior); "
+        "rank trivial getters/wrappers/formatters last.\n\n"
+        "Eligible self-contained functions:\n{}\n\n"
+        "Return ONLY a JSON array of the item numbers, best first, e.g. [3, 0, 7]."
+    ).format(repo, listing);
+    order: List[int] = [];
+    try:
+        text = llm.complete(prompt, role="strategy").get("text", "");
+        m = re.search(r"\[[\d,\s]*\]", text);
+        if m:
+            order = [int(x) for x in json.loads(m.group(0))];
+    except Exception:
+        order = [];
+    if not order:
+        _log(verbose, "LLM ranking unavailable -> falling back to complexity score");
+        return pool
+
+    seen = set();
+    ranked = [];
+    for idx in order:
+        if 0 <= idx < len(head) and idx not in seen:
+            seen.add(idx);
+            ranked.append(head[idx]);
+    for i, c in enumerate(head):  # any the model omitted, in complexity order
+        if i not in seen:
+            ranked.append(c);
+    ranked.extend(pool[60:]);
+    if ranked:
+        _log(verbose, "LLM ranked targets; top pick {}::{}".format(ranked[0]["rel"], ranked[0]["name"]));
+    return ranked
+
+
 def discover_targets(
     repo: str,
     mutants_per: int = 5,
@@ -196,22 +272,31 @@ def discover_targets(
                     "rel": rel, "src": src, "language": language, "name": name,
                     "score": _complexity(_function_span(src, name, language)),
                 });
-        candidates.sort(key=lambda c: c["score"], reverse=True);
-        _log(verbose, "{} eligible function(s); ranking by complexity".format(len(candidates)));
+        candidates = _llm_rank(repo, candidates, verbose);
+        _log(verbose, "{} eligible function(s); ranked by the strategy model".format(len(candidates)));
 
         # Pass 2: generate mutants best-first, stopping at max_targets.
-        for c in candidates:
+        planned = min(max_targets, len(candidates)) if max_targets else len(candidates);
+        for i, c in enumerate(candidates):
             if max_targets and len(targets) >= max_targets:
                 _log(verbose, "reached max_targets={} -> stopping".format(max_targets));
                 break
+            fn = "{}::{}".format(c["rel"], c["name"]);
+            _log(verbose, "[{}/{}] → generating {} mutants for {} (score {})  [LLM]…".format(
+                len(targets) + 1, planned, mutants_per, fn, c["score"]));
+            started = time.perf_counter();
             try:
                 mutants = acquire.generate_mutants(c["src"], c["name"], c["language"], mutants_per);
             except Exception as exc:
-                _log(verbose, "skipping {}::{} (mutant-gen failed: {})".format(c["rel"], c["name"], exc));
+                _log(verbose, "    ✗ {} skipped after {:.1f}s (mutant-gen failed: {})".format(
+                    fn, time.perf_counter() - started, exc));
                 continue
             if not mutants:
+                _log(verbose, "    ✗ {} skipped after {:.1f}s (no valid mutants)".format(
+                    fn, time.perf_counter() - started));
                 continue
             targets.append((c["rel"], acquire.Target(c["src"], mutants, c["language"], c["name"])));
-            _log(verbose, "target {}::{} (score {}, {} mutants)".format(c["rel"], c["name"], c["score"], len(mutants)));
+            _log(verbose, "    ✓ {}  {} mutants in {:.1f}s".format(
+                fn, len(mutants), time.perf_counter() - started));
     _log(verbose, "{} target(s) with valid mutants".format(len(targets)));
     return targets
