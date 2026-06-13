@@ -264,8 +264,10 @@ def telemetry_cells(st, panel_w):
             c.text("  " + sp, ORANGE)
 
     row("tokens", tok)
-    row("strategy", lambda c: c.text(trunc(st["strategy_model"], inner - LBL), CYAN))
-    row("bulk", lambda c: c.text(trunc(st["bulk_model"], inner - LBL), PURPLE))
+    # The two-tier story, made explicit for the judges: who invents the bugs vs. who
+    # writes the tests. Show the bare model name (drop the provider prefix).
+    row("adversary", lambda c: c.text(trunc(st["strategy_model"].split("/")[-1], inner - LBL), CYAN, bold=True))
+    row("defender", lambda c: c.text(trunc(st["bulk_model"].split("/")[-1], inner - LBL), PURPLE, bold=True))
 
     def status(c):
         if st.get("plateau"):
