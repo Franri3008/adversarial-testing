@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 
 from fixtures.buggy import BUGGY_SRC, ONESHOT_SRC, PLANTED_BUGS, REFERENCE_SRC
 from generator import generate_test
-from harness import JsonlLogger, is_plateau
+from harness import JsonlLogger, hardening_completed, is_plateau, iteration_completed, mutants_generated, run_finished
 import repair_main as repair
 
 LOG_PATH = "orchestrate_run.jsonl";
@@ -16,29 +16,34 @@ ROLE_ORDER = ["bulk", "strategy"];
 def _phase2_harden(code: str, suite_sources: List[str], start_tokens: int, logger: JsonlLogger) -> Dict[str, Any]:
     tokens = start_tokens;
     mutants = repair._discover_mutants(code);
+    logger.append(mutants_generated(logger.run_id, "harden", mutants));
+    surviving = list(mutants);
     kill_rates = [];
     role_idx = 0;
-    stop = "max-iterations";
+    stop = "max_iterations";
     print("phase  iteration  cumulative_tokens  tier      kill_rate  surviving");
     for iteration in range(1, HARDEN_MAX + 1):
         kill_rate, surviving = repair._measure_kill_rate(code, suite_sources, mutants);
         kill_rates.append(kill_rate);
-        entry = {
-            "phase": "harden",
-            "iteration": iteration,
-            "cumulative_tokens": tokens,
-            "tier": ROLE_ORDER[role_idx],
-            "kill_rate": kill_rate,
-            "surviving": len(surviving),
-        };
+        entry = iteration_completed(
+            logger.run_id,
+            "harden",
+            iteration,
+            tokens,
+            kill_rate,
+            [],
+            surviving,
+            tier=ROLE_ORDER[role_idx],
+            surviving=len(surviving),
+        );
         logger.append(entry);
         print("harden  {:>9}  {:>17}  {:<8}  {:>9.3f}  {}".format(iteration, tokens, ROLE_ORDER[role_idx], kill_rate, len(surviving)));
 
         if not surviving:
-            stop = "full-kill";
+            stop = "all_killed";
             break
         if TOKEN_CAP and tokens >= TOKEN_CAP:
-            stop = "budget-cap";
+            stop = "token_cap";
             break
         if is_plateau(kill_rates):
             if role_idx < len(ROLE_ORDER) - 1:
@@ -54,6 +59,24 @@ def _phase2_harden(code: str, suite_sources: List[str], start_tokens: int, logge
         if repair._passes_on_correct(new_test, code):
             suite_sources.append(repair._mangle(new_test, "p2_{}".format(iteration)));
     final_kill_rate = kill_rates[-1] if kill_rates else 0.0;
+    logger.append(hardening_completed(
+        logger.run_id,
+        "harden",
+        len(kill_rates),
+        tokens,
+        final_kill_rate,
+        mutants,
+        surviving if kill_rates else mutants,
+        [],
+    ));
+    logger.append(run_finished(
+        logger.run_id,
+        "harden",
+        "completed" if stop == "all_killed" else "stopped",
+        stop,
+        tokens,
+        kill_rate=final_kill_rate,
+    ));
     return {"cumulative_tokens": tokens, "kill_rate": final_kill_rate, "stop": stop}
 
 
@@ -65,6 +88,7 @@ def main() -> None:
     for entry in repaired["entries"]:
         merged = dict(entry);
         merged["phase"] = "repair";
+        merged["run_id"] = logger.run_id;
         logger.append(merged);
 
     print("");

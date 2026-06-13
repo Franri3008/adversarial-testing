@@ -3,7 +3,18 @@ import sys
 from typing import Dict, List, Optional
 
 from generator import generate_test
-from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
+from harness import (
+    JsonlLogger,
+    compute_kill_rate,
+    is_plateau,
+    iteration_completed,
+    make_log_entry,
+    mutant_records,
+    mutants_generated,
+    run_baseline,
+    run_finished,
+    run_started,
+)
 
 MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
@@ -77,6 +88,14 @@ def main() -> None:
 
     logger = JsonlLogger(LOG_PATH)
     total = len(mutants)
+    target = {
+        "repo": kwargs.get("repo", "(built-in fixture)"),
+        "file": kwargs.get("file", "-"),
+        "function": function_name or kwargs.get("function", "-"),
+        "language": language,
+    }
+    logger.append(run_started(logger.run_id, "harden", target, reference_src=reference_src))
+    logger.append(mutants_generated(logger.run_id, "harden", mutants))
 
     baseline = run_baseline(reference_src, mutants, gen_fn, run_and_check)
     print("baseline kill_rate={:.3f} tokens={}".format(baseline["kill_rate"], baseline["cumulative_tokens"]))
@@ -90,6 +109,7 @@ def main() -> None:
     suite_sources = []
     strategy_model = ""
     bulk_model = ""
+    stop_reason = "max_iterations"
 
     print("iter  tier      cum_tokens   cost$    kill_rate  killed_this_round")
     for iteration in range(1, MAX_ITERATIONS + 1):
@@ -112,7 +132,22 @@ def main() -> None:
         kill_rate = compute_kill_rate(len(killed_total), total)
         kill_rates.append(kill_rate)
 
-        entry = make_log_entry(iteration, cumulative_tokens, kill_rate, killed_this_round)
+        killed_mutants = [m for m in mutants if m["id"] in set(killed_this_round)]
+        entry = iteration_completed(
+            logger.run_id,
+            "harden",
+            iteration,
+            cumulative_tokens,
+            kill_rate,
+            killed_this_round,
+            surviving,
+            cost_usd=cumulative_cost,
+            tier=role,
+            generated_test_src=gen["test_src"],
+            reference_passed=result["reference_passed"],
+            killed_mutants=mutant_records(killed_mutants, status="killed"),
+        )
+        entry.update(make_log_entry(iteration, cumulative_tokens, kill_rate, killed_this_round))
         entry["tier"] = role
         entry["cost_usd"] = round(cumulative_cost, 4)
         logger.append(entry)
@@ -121,14 +156,17 @@ def main() -> None:
 
         # STOP: every mutant killed — the loop has fully succeeded.
         if not surviving:
+            stop_reason = "all_killed"
             print("all {} mutants killed at iteration {}".format(total, iteration))
             break
 
         # STOP: budget caps (the non-negotiable terminal condition).
         if COST_CAP_USD and cumulative_cost >= COST_CAP_USD:
+            stop_reason = "cost_cap"
             print("cost cap ${:.2f} reached -> stop".format(COST_CAP_USD))
             break
         if TOKEN_CAP and cumulative_tokens >= TOKEN_CAP:
+            stop_reason = "token_cap"
             print("token cap {} reached -> stop".format(TOKEN_CAP))
             break
 
@@ -141,24 +179,35 @@ def main() -> None:
                     role, len(surviving), ROLE_ORDER[role_idx]))
                 kill_rates = []  # give the stronger tier a fresh plateau window
             else:
+                stop_reason = "plateau"
                 print("plateau on strongest tier '{}' -> stop ({} unkilled)".format(
                     role, len(surviving)))
                 break
 
     final = compute_kill_rate(len(killed_total), total)
+    logger.append(run_finished(
+        logger.run_id,
+        "harden",
+        "completed" if final >= 1.0 else "stopped",
+        stop_reason,
+        cumulative_tokens,
+        kill_rate=final,
+        cost_usd=cumulative_cost,
+        total_mutants=total,
+        killed_mutant_ids=sorted(killed_total),
+        surviving_mutants=mutant_records(surviving, status="surviving"),
+    ))
     print("final kill_rate={:.3f} over {} mutants, cost=${:.4f}, log at {}".format(
         final, total, cumulative_cost, LOG_PATH))
 
     import report
     meta = {
-        "repo": kwargs.get("repo", "(built-in fixture)"),
-        "file": kwargs.get("file", "-"),
-        "function": function_name or kwargs.get("function", "-"),
-        "language": language,
+        **target,
         "strategy_model": strategy_model or "-",
         "bulk_model": bulk_model or "-",
         "total_mutants": total,
         "surviving": surviving,
+        "stop_reason": stop_reason,
     }
     report_path = report.write_report(meta, logger.entries, suite_sources, baseline=baseline)
     print("report at {}".format(report_path))
