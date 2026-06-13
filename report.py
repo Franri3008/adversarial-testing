@@ -117,14 +117,85 @@ def _suite_filename(language: str, index: int) -> str:
     return "adversarial_test_{:02d}.{}".format(index, _EXT.get(language, "txt"))
 
 
+def _metric_entries(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [
+        entry for entry in entries
+        if "kill_rate" in entry and (entry.get("event") in (None, "iteration_completed", "run_finished"))
+    ]
+
+
 def _final_kill_rate(entries: List[Dict[str, Any]]) -> float:
-    return entries[-1].get("kill_rate", 0.0) if entries else 0.0
+    finished = [entry for entry in entries if entry.get("event") == "run_finished"]
+    if finished:
+        return finished[-1].get("kill_rate", 0.0)
+    metrics = _metric_entries(entries)
+    return metrics[-1].get("kill_rate", 0.0) if metrics else 0.0
+
+
+def _last_event(entries: List[Dict[str, Any]], name: str) -> Optional[Dict[str, Any]]:
+    matches = [entry for entry in entries if entry.get("event") == name]
+    return matches[-1] if matches else None
+
+
+def _md(text: Any) -> str:
+    return str(text).replace("|", "\\|").replace("\n", " ")
+
+
+def _language_fence(language: str) -> str:
+    if language == "typescript":
+        return "ts"
+    if language == "python":
+        return "python"
+    return ""
+
+
+def _collect_mutants(entries: List[Dict[str, Any]], meta: Dict[str, Any]) -> List[Dict[str, Any]]:
+    by_id: Dict[str, Dict[str, Any]] = {}
+    for entry in entries:
+        for mutant in entry.get("mutants") or []:
+            mid = mutant.get("id")
+            if not mid:
+                continue
+            existing = by_id.get(mid, {})
+            merged = dict(existing)
+            merged.update({k: v for k, v in mutant.items() if v not in (None, "")})
+            merged["status"] = mutant.get("status") or existing.get("status") or "generated"
+            by_id[mid] = merged
+        for mutant in entry.get("killed_mutants") or []:
+            mid = mutant.get("id")
+            if mid:
+                by_id[mid] = {**by_id.get(mid, {}), **mutant, "status": "killed"}
+        for mutant in entry.get("surviving_mutants") or []:
+            mid = mutant.get("id")
+            if mid:
+                by_id[mid] = {**by_id.get(mid, {}), **mutant, "status": "surviving"}
+
+    for mutant in meta.get("surviving") or []:
+        mid = mutant.get("id")
+        if mid:
+            by_id[mid] = {**by_id.get(mid, {}), **mutant, "status": "surviving"}
+    return sorted(by_id.values(), key=lambda item: item.get("id", ""))
+
+
+def _target_from_events(entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+    started = _last_event(entries, "run_started") or {}
+    return started.get("target") or {}
 
 
 def _markdown(meta: Dict[str, Any], entries: List[Dict[str, Any]], baseline: Optional[Dict[str, Any]], suite_files: List[str]) -> str:
     final = _final_kill_rate(entries);
     base_kr = baseline.get("kill_rate", 0.0) if baseline else 0.0;
-    total_mutants = meta.get("total_mutants", 0);
+    target = {**_target_from_events(entries), **meta}
+    mutants = _collect_mutants(entries, meta)
+    total_mutants = meta.get("total_mutants", len(mutants));
+    finished = _last_event(entries, "run_finished") or {}
+    stop_reason = meta.get("stop_reason") or finished.get("stop_reason", "-")
+    metrics = _metric_entries(entries)
+    accepted_fixes = [entry for entry in entries if entry.get("event") == "fix_accepted"]
+    rejected_fixes = [entry for entry in entries if entry.get("event") == "fix_rejected"]
+    generated_mutant_events = [entry for entry in entries if entry.get("event") == "mutants_generated"]
+    language = target.get("language", meta.get("language", "python"))
+    fence = _language_fence(language)
     lines = [];
     lines.append("# Adversarial test-hardening report");
     lines.append("");
@@ -132,10 +203,10 @@ def _markdown(meta: Dict[str, Any], entries: List[Dict[str, Any]], baseline: Opt
     lines.append("");
     lines.append("| | |");
     lines.append("|---|---|");
-    lines.append("| repo | `{}` |".format(meta.get("repo", "(built-in fixture)")));
-    lines.append("| file | `{}` |".format(meta.get("file", "-")));
-    lines.append("| function | `{}` |".format(meta.get("function", "-")));
-    lines.append("| language | {} |".format(meta.get("language", "-")));
+    lines.append("| repo | `{}` |".format(target.get("repo", "(built-in fixture)")));
+    lines.append("| file | `{}` |".format(target.get("file", "-")));
+    lines.append("| function | `{}` |".format(target.get("function", "-")));
+    lines.append("| language | {} |".format(target.get("language", "-")));
     lines.append("| strategy model | `{}` |".format(meta.get("strategy_model", "-")));
     lines.append("| bulk model | `{}` |".format(meta.get("bulk_model", "-")));
     lines.append("");
@@ -146,29 +217,111 @@ def _markdown(meta: Dict[str, Any], entries: List[Dict[str, Any]], baseline: Opt
     lines.append("- **Baseline (one cold-start test):** {:.0%} kill rate".format(base_kr));
     lines.append("- **Final (hardened suite):** {:.0%} kill rate over {} mutants".format(final, total_mutants));
     lines.append("- **Gain from looping:** +{:.0%}".format(max(0.0, final - base_kr)));
-    if entries:
-        lines.append("- **Tokens spent:** {:,}".format(int(entries[-1].get("cumulative_tokens", 0))));
-        if "cost_usd" in entries[-1]:
-            lines.append("- **Cost:** ${:.4f}".format(entries[-1]["cost_usd"]));
+    lines.append("- **Stop reason:** `{}`".format(stop_reason));
+    last_metric = metrics[-1] if metrics else (entries[-1] if entries else {});
+    if last_metric:
+        lines.append("- **Tokens spent:** {:,}".format(int(last_metric.get("cumulative_tokens", 0))));
+        if "cost_usd" in last_metric:
+            lines.append("- **Cost:** ${:.4f}".format(last_metric["cost_usd"]));
+    lines.append("");
+    lines.append("## Run status");
+    lines.append("");
+    lines.append("| event | phase | iteration | status | detail |");
+    lines.append("|---|---|---|---|---|");
+    for entry in entries:
+        if not entry.get("event"):
+            continue
+        detail = entry.get("stop_reason") or entry.get("note") or entry.get("reason") or ""
+        if entry.get("event") == "mutants_generated":
+            detail = "{} mutant(s)".format(entry.get("total_mutants", len(entry.get("mutants") or [])))
+        lines.append("| {} | {} | {} | {} | {} |".format(
+            _md(entry.get("event", "-")),
+            _md(entry.get("phase", "-")),
+            _md(entry.get("iteration", "-")),
+            _md(entry.get("status", "-")),
+            _md(detail or "-"),
+        ));
     lines.append("");
     lines.append("## Progress per iteration");
     lines.append("");
     lines.append("| iter | tier | cum. tokens | kill rate | killed this round |");
     lines.append("|---|---|---|---|---|");
-    for e in entries:
+    for e in metrics:
+        if e.get("event") == "run_finished":
+            continue
         killed = e.get("killed_this_round") or [];
         lines.append("| {} | {} | {:,} | {:.0%} | {} |".format(
             e.get("iteration", "-"), e.get("tier", "-"), int(e.get("cumulative_tokens", 0)),
             e.get("kill_rate", 0.0), ", ".join(killed) if killed else "—"));
     lines.append("");
-    surviving = meta.get("surviving") or [];
-    lines.append("## Mutants still surviving");
+    lines.append("## Mutants generated");
     lines.append("");
-    if surviving:
-        for m in surviving:
-            lines.append("- `{}` — {}".format(m.get("id", "?"), m.get("description", "")));
+    if mutants:
+        lines.append("| id | status | description |");
+        lines.append("|---|---|---|");
+        for mutant in mutants:
+            lines.append("| `{}` | {} | {} |".format(
+                _md(mutant.get("id", "?")),
+                _md(mutant.get("status", "generated")),
+                _md(mutant.get("description", "")),
+            ));
+    elif generated_mutant_events:
+        lines.append("Mutant generation events were recorded, but no valid mutants were retained.");
     else:
-        lines.append("None — every mutant was killed.");
+        lines.append("No mutant details were recorded in this log.");
+    lines.append("");
+    for mutant in mutants:
+        if mutant.get("src"):
+            lines.append("<details>");
+            lines.append("<summary>{} source</summary>".format(mutant.get("id", "?")));
+            lines.append("");
+            lines.append("```{}".format(fence));
+            lines.append(mutant.get("src", ""));
+            lines.append("```");
+            lines.append("");
+            lines.append("</details>");
+            lines.append("");
+    lines.append("## Fixes accepted");
+    lines.append("");
+    if accepted_fixes:
+        for entry in accepted_fixes:
+            bug = entry.get("bug") or {};
+            lines.append("### `{}`".format(bug.get("id", "fix")));
+            lines.append("");
+            lines.append("- Description: {}".format(bug.get("description", "")));
+            lines.append("- Iteration: {}".format(entry.get("iteration", "-")));
+            lines.append("");
+            if entry.get("generated_test_src"):
+                lines.append("Generated test:");
+                lines.append("");
+                lines.append("```{}".format(fence));
+                lines.append(entry["generated_test_src"]);
+                lines.append("```");
+                lines.append("");
+            if entry.get("final_code"):
+                lines.append("Accepted fixed source:");
+                lines.append("");
+                lines.append("```{}".format(fence));
+                lines.append(entry["final_code"]);
+                lines.append("```");
+                lines.append("");
+    else:
+        lines.append("No accepted fixes were recorded.");
+    lines.append("");
+    lines.append("## Fixes rejected");
+    lines.append("");
+    if rejected_fixes:
+        lines.append("| iter | bug | reason |");
+        lines.append("|---|---|---|");
+        for entry in rejected_fixes:
+            bug = entry.get("bug") or {};
+            lines.append("| {} | `{}` | {} |".format(
+                entry.get("iteration", "-"),
+                _md(bug.get("id", "?")),
+                _md(entry.get("reason", "")),
+            ));
+    else:
+        lines.append("No rejected fixes were recorded.");
     lines.append("");
     lines.append("## Generated adversarial tests (the changes)");
     lines.append("");
@@ -194,7 +347,7 @@ def write_report(meta: Dict[str, Any], entries: List[Dict[str, Any]], suite_sour
         with open(os.path.join(tests_dir, name), "w") as handle:
             handle.write(src);
         suite_files.append(name);
-    render_convergence(os.path.join(out_dir, "convergence.png"), entries, baseline);
+    render_convergence(os.path.join(out_dir, "convergence.png"), _metric_entries(entries), baseline);
     markdown = _markdown(meta, entries, baseline, suite_files);
     report_path = os.path.join(out_dir, "report.md");
     with open(report_path, "w") as handle:
@@ -222,7 +375,9 @@ def main() -> None:
         print("no log at {}; run main.py first".format(log_path));
         return
     entries = _read_jsonl(log_path);
-    meta = {"total_mutants": 0};
+    target = _target_from_events(entries);
+    mutants = _collect_mutants(entries, {});
+    meta = {**target, "total_mutants": len(mutants)};
     path = write_report(meta, entries, [], baseline=None);
     print("wrote {}".format(path));
 

@@ -8,7 +8,20 @@ from typing import Any, Dict, List, Optional
 from fixer import generate_fix
 from fixtures.buggy import BUGGY_SRC, MUTANTS as SEED_MUTANTS, ONESHOT_SRC, PLANTED_BUGS, REFERENCE_SRC
 from generator import generate_test
-from harness import JsonlLogger, compute_kill_rate
+from harness import (
+    JsonlLogger,
+    bug_selected,
+    compute_kill_rate,
+    fix_accepted,
+    fix_attempted,
+    fix_rejected,
+    hardening_completed,
+    iteration_completed,
+    mutants_generated,
+    new_run_id,
+    run_finished,
+    run_started,
+)
 import llm
 from repair_generator import generate_bug_test
 import runner
@@ -199,6 +212,7 @@ def _oneshot_baseline(buggy_src: str, planted_bugs: List[Dict[str, Any]], onesho
 
 
 def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Optional[List[Dict[str, Any]]] = None, start_tokens: int = 0, verbose: bool = True, oneshot_src: Optional[str] = None, eval_mutants: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    run_id = new_run_id();
     buggy_src = code;
     # Fixture mode (planted_bugs given) grades against a known answer key and measures the
     # suite against a frozen mutant population on a frozen oracle. Generalized mode (CLI /
@@ -229,7 +243,18 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
     fixed_bugs = [];
     fixed_descriptions = [];
     attempted = [];
-    entries = [];
+    entries = [
+        run_started(
+            run_id,
+            "repair",
+            {
+                "function": _function_name(code),
+                "language": "python",
+                "mode": "fixture" if has_oracle else "generalized",
+            },
+            reference_src=code,
+        )
+    ];
     cumulative_tokens = start_tokens + baseline["cumulative_tokens"];
     fixes_made = 0;
     no_progress = 0;
@@ -241,6 +266,14 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
         observation = _build_observation(code, [{"id": "", "description": d} for d in fixed_descriptions], attempted, seed_bugs, cumulative_tokens);
         decision = find_bug(observation);
         cumulative_tokens += _token_count(decision["tokens"]);
+        entries.append(bug_selected(
+            run_id,
+            "repair",
+            iteration,
+            decision["has_bug"],
+            decision.get("bug"),
+            cumulative_tokens,
+        ));
 
         if not decision["has_bug"]:
             no_progress += 1;
@@ -255,26 +288,79 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
                 cumulative_tokens += _token_count(gen["tokens"]);
                 test_src = gen["test_src"];
                 if not test_src:
+                    entries.append(fix_rejected(
+                        run_id,
+                        "repair",
+                        iteration,
+                        bug,
+                        "no_test_generated",
+                        cumulative_tokens,
+                    ));
                     continue
                 fix = generate_fix(code, bug, test_src, oracle_src=None, stub_fixed_src=bug.get("stub_fixed_src"));
                 cumulative_tokens += _token_count(fix["tokens"]);
                 fixed_src = fix["fixed_src"];
+                entries.append(fix_attempted(
+                    run_id,
+                    "repair",
+                    iteration,
+                    bug,
+                    attempt,
+                    test_src,
+                    fixed_src,
+                    cumulative_tokens,
+                ));
                 # Accept only if the new test exposes the bug (fails on old, passes on fixed)
                 # AND the fix breaks none of the already-accepted tests (no-regression gate).
-                if _verify_fix(test_src, fixed_src, code, bug["id"], bug["description"]) and _suite_passes(accepted_tests, fixed_src):
+                exposes_bug = _verify_fix(test_src, fixed_src, code, bug["id"], bug["description"]);
+                suite_ok = _suite_passes(accepted_tests, fixed_src) if exposes_bug else False;
+                if exposes_bug and suite_ok:
                     code = fixed_src;
-                    accepted_tests.append(_mangle(test_src, "{}_{}".format(bug["id"], iteration)));
+                    accepted_test = _mangle(test_src, "{}_{}".format(bug["id"], iteration));
+                    accepted_tests.append(accepted_test);
                     fixed_descriptions.append(bug["description"]);
                     fixed_bugs.append(bug);
                     fixes_made += 1;
                     accepted = True;
+                    entries.append(fix_accepted(
+                        run_id,
+                        "repair",
+                        iteration,
+                        bug,
+                        accepted_test,
+                        code,
+                        cumulative_tokens,
+                    ));
                     break
+                reason = "test_did_not_expose_bug" if not exposes_bug else "regression_suite_failed";
+                entries.append(fix_rejected(
+                    run_id,
+                    "repair",
+                    iteration,
+                    bug,
+                    reason,
+                    cumulative_tokens,
+                    generated_test_src=test_src,
+                    proposed_fixed_src=fixed_src,
+                ));
             if accepted:
                 no_progress = 0;
                 note = "fixed via {}".format(bug["id"]);
                 mutants = _discover_mutants(code);
-                last_harden_kr, _, harden_tokens = _harden(code, accepted_tests, mutants, "{}_{}".format(bug["id"], iteration));
+                entries.append(mutants_generated(run_id, "repair", mutants, iteration=iteration));
+                tests_before_harden = len(accepted_tests);
+                last_harden_kr, surviving_after_harden, harden_tokens = _harden(code, accepted_tests, mutants, "{}_{}".format(bug["id"], iteration));
                 cumulative_tokens += harden_tokens;
+                entries.append(hardening_completed(
+                    run_id,
+                    "repair",
+                    iteration,
+                    cumulative_tokens,
+                    last_harden_kr,
+                    mutants,
+                    surviving_after_harden,
+                    accepted_tests[tests_before_harden:],
+                ));
             else:
                 no_progress += 1;
                 attempted.append({"id": bug["id"], "description": bug["description"]});
@@ -292,15 +378,20 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
             graded = fixes_made;
             kill_rate = last_harden_kr;
             total_display = fixes_made;
-        entry = {
-            "iteration": iteration,
-            "cumulative_tokens": cumulative_tokens,
-            "bugs_fixed": graded,
-            "total_bugs": total_display,
-            "kill_rate": kill_rate,
-            "suite_size": len(accepted_tests),
-            "fixes_made": fixes_made,
-        };
+        entry = iteration_completed(
+            run_id,
+            "repair",
+            iteration,
+            cumulative_tokens,
+            kill_rate,
+            [],
+            [],
+            bugs_fixed=graded,
+            total_bugs=total_display,
+            suite_size=len(accepted_tests),
+            fixes_made=fixes_made,
+            note=note,
+        );
         entries.append(entry);
         if verbose:
             print("{:>4}  {:>10}  {:>9}  {:>9.3f}  {:>5}  {}".format(
@@ -309,11 +400,15 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
         if has_oracle and graded >= len(planted_bugs) and kill_rate >= 1.0:
             if verbose:
                 print("all {} planted bugs fixed and suite kills every regression at iter {}".format(len(planted_bugs), iteration));
+            stop_reason = "all_fixed";
             break
         if no_progress >= PATIENCE:
             if verbose:
                 print("plateau: {} iterations without progress -> stop".format(PATIENCE));
+            stop_reason = "no_progress";
             break
+    else:
+        stop_reason = "max_iterations";
 
     if has_oracle:
         graded = _grade(code, buggy_src, planted_bugs);
@@ -331,7 +426,21 @@ def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Option
         if verbose:
             print("LOOP    : made {} fixes, {} regression tests, {:.0%} suite kill-rate, {} tokens".format(
                 fixes_made, len(accepted_tests), kill_rate, cumulative_tokens));
+    entries.append(run_finished(
+        run_id,
+        "repair",
+        "completed" if (has_oracle and graded >= len(planted_bugs)) else "stopped",
+        stop_reason,
+        cumulative_tokens,
+        kill_rate=kill_rate,
+        final_code=code,
+        bugs_fixed=graded,
+        total_bugs=total_display,
+        suite_size=len(accepted_tests),
+        fixes_made=fixes_made,
+    ));
     return {
+        "run_id": run_id,
         "buggy_src": buggy_src,
         "final_code": code,
         "suite_sources": accepted_tests,
@@ -380,7 +489,7 @@ def _resolve_repair_target():
 
 def main() -> None:
     result = _resolve_repair_target();
-    logger = JsonlLogger(LOG_PATH);
+    logger = JsonlLogger(LOG_PATH, run_id=result.get("run_id"));
     with open(BASELINE_PATH, "w") as handle:
         json.dump(result["baseline"], handle);
     for entry in result["entries"]:
