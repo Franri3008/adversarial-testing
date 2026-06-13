@@ -1,8 +1,7 @@
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import llm
-from fixtures import FUNCTION_NAME, LANGUAGE
 
 
 def _python_function_name(reference_src: str) -> str:
@@ -10,9 +9,9 @@ def _python_function_name(reference_src: str) -> str:
     return m.group(1) if m else "subject"
 
 
-def _ts_function_name(reference_src: str) -> str:
-    if FUNCTION_NAME:
-        return FUNCTION_NAME
+def _ts_function_name(reference_src: str, given: Optional[str]) -> str:
+    if given:
+        return given
     m = re.search(r"export\s+function\s+(\w+)\s*\(", reference_src)
     return m.group(1) if m else "subject"
 
@@ -61,12 +60,14 @@ def generate_test(
     reference_src: str,
     surviving_mutants: List[Dict[str, Any]],
     role: str = "bulk",
+    language: str = "python",
+    function_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    if LANGUAGE == "typescript":
-        fn = _ts_function_name(reference_src)
+    if language == "typescript":
+        fn = _ts_function_name(reference_src, function_name)
         prompt = _build_prompt_typescript(reference_src, fn, surviving_mutants)
     else:
-        fn = _python_function_name(reference_src)
+        fn = function_name or _python_function_name(reference_src)
         prompt = _build_prompt_python(reference_src, fn, surviving_mutants)
 
     response = llm.complete(prompt, role=role)

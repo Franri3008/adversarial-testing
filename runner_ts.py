@@ -48,6 +48,20 @@ def _vitest_passes(impl_src: str, test_src: str) -> bool:
     return proc.returncode == 0
 
 
+def compiles(impl_src: str, function_name: str) -> bool:
+    """Smoke check: does this impl load and export `function_name`?
+
+    Used to drop LLM-generated mutants that don't compile, so a broken mutant
+    never counts as a false 'kill'.
+    """
+    smoke = (
+        f'import {{ {function_name} }} from "./impl";\n'
+        'import { test, expect } from "vitest";\n'
+        f'test("loads", () => {{ expect(typeof {function_name}).toBe("function"); }});\n'
+    )
+    return _vitest_passes(impl_src, smoke)
+
+
 def run_and_check(
     test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
 ) -> Dict[str, Any]:

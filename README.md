@@ -104,6 +104,47 @@ all 5 mutants killed at iteration 1
 final kill_rate=1.000 over 5 mutants, cost=$0.1407, log at run.jsonl
 ```
 
+## Run against any repo (CLI)
+
+Point the loop at a function in **any GitHub repo** — no fixture authoring. It fetches the
+file, asks the strategy model to generate realistic mutants (each validated to compile),
+infers the language from the extension, and runs the loop:
+
+```bash
+python3 main.py \
+  repo=https://github.com/NVIDIA/NemoClaw \
+  file=src/lib/domain/duration.ts \
+  function=parseDuration \
+  mutants=5
+```
+
+Real output — mutants are **auto-generated and compile-checked**, then killed:
+
+```
+[acquire] https://github.com/NVIDIA/NemoClaw :: src/lib/domain/duration.ts (typescript), target `parseDuration`
+[acquire] 5 valid mutants: ['off_by_one_max', 'wrong_max_constant', 'zero_guard_allows_zero', 'wrong_default_unit', 'wrong_minute_multiplier']
+baseline kill_rate=1.000 tokens=2509
+iter  tier      cum_tokens   cost$    kill_rate  killed_this_round
+   1  bulk            2817   0.035      1.000  ['off_by_one_max', 'wrong_max_constant', 'zero_guard_allows_zero', 'wrong_default_unit', 'wrong_minute_multiplier']
+all 5 mutants killed at iteration 1
+final kill_rate=1.000 over 5 mutants, cost=$0.0346, log at run.jsonl
+```
+
+| Arg | Meaning |
+|-----|---------|
+| `repo=` | repo URL (`https://github.com/owner/name`) or `owner/name` |
+| `file=` | path to the source file within the repo |
+| `function=` | the function under test |
+| `mutants=` | how many mutants to generate (default 5) |
+
+Language is inferred from the file extension (`.ts`/`.tsx` → vitest, `.py` → pytest).
+Requires the `gh` CLI authenticated; for TypeScript, install the harness once
+(`cd ts_harness && npm install`). Env vars (iterations, caps, backend) apply as below.
+
+**Limitations (today):** the target file must be **self-contained** (no unresolved
+imports) so it loads in the standalone harness — `duration.ts` qualifies. Any mutant that
+fails to compile is dropped, so a broken mutant never counts as a false kill.
+
 ## Configuration
 
 All optional, via environment variables:
@@ -138,6 +179,7 @@ reference and every mutant — for Python via a pytest fixture, for TypeScript b
 
 ## Roadmap
 
-- **Real-repo target beyond a single function:** mutate a chosen function *in place* inside
-  a checked-out repo and run that repo's own suite, instead of the isolated `ts_harness`.
-- **More NemoClaw fixtures** across `src/lib/**` to grow coverage.
+- **Auto-pick the target function** so `repo=` alone works (today you pass `file=`/`function=`).
+- **Files with imports:** resolve sibling modules into the harness so non-self-contained
+  functions can be targeted (today the target file must be self-contained).
+- **More NemoClaw targets** across `src/lib/**` to grow coverage.
