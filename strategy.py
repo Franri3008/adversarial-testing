@@ -42,6 +42,10 @@ def _fallback(observation: Dict[str, Any], tokens: Dict[str, int]) -> Dict[str, 
     if not seed:
         return {"has_bug": False, "bug": {}, "should_continue": False, "tokens": tokens}
     bug = {"id": seed["id"], "description": seed["description"], "target_name": seed.get("target_name", "")};
+    # Carry the seed's offline test/fix so the stub-backed demo can run without a model.
+    for key in ("stub_test_src", "stub_fixed_src"):
+        if seed.get(key):
+            bug[key] = seed[key];
     return {"has_bug": True, "bug": bug, "should_continue": True, "tokens": tokens}
 
 

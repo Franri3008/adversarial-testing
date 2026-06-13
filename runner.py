@@ -14,6 +14,7 @@ toy fixtures the blast radius is a pure function.)
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import sys
@@ -47,6 +48,10 @@ def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str) -> bool
     (workdir / "impl.py").write_text(impl_src)
     (workdir / "conftest.py").write_text(CONFTEST_TMPL.format(fn=fn))
     (workdir / "test_generated.py").write_text(test_src)
+    # All implementations in one run reuse this workdir's `impl.py`, so cached bytecode
+    # could let a mutant import a stale (reference) `impl` and report a wrong kill.
+    # Disable bytecode writing in the subprocess so each run always loads fresh source.
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "test_generated.py"],
@@ -54,6 +59,7 @@ def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str) -> bool
             capture_output=True,
             text=True,
             timeout=PYTEST_TIMEOUT,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return False  # a hanging test counts as "did not pass"

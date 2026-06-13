@@ -227,7 +227,7 @@ All optional, via environment variables:
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `FIXTURE` | `toy` | which target to run: `toy` (Python) or `duration_ts` (TypeScript) |
-| `BACKEND` | `cli` | `cli` (uses `claude -p`) or `sdk` (Anthropic/Nebius SDKs) |
+| `BACKEND` | `cli` | `cli` (uses `claude -p`), `sdk` (Anthropic/Nebius SDKs), or `stub` (deterministic offline, no network) |
 | `BULK_MODEL` | `haiku` | cheap tier — model alias for the CLI backend |
 | `STRATEGY_MODEL` | `opus` | smart tier used when the loop escalates |
 | `MAX_ITERATIONS` | `25` | hard cap on loop iterations |
@@ -242,6 +242,15 @@ The loop ends on the first of:
 2. **Plateau on the strongest tier** — no kill-rate progress after escalating bulk → strategy.
 3. **Budget cap** — `COST_CAP` or `TOKEN_CAP` reached.
 4. **`MAX_ITERATIONS`** — hard backstop.
+
+A real backend (`cli`/`sdk`) that errors (auth, rate-limit, transport) now **fails loud** —
+`llm.complete` raises rather than silently returning a stub, so a credential problem can't
+masquerade as an (empty) plateau. Use `BACKEND=stub` for the explicit offline path.
+
+> **Reproducibility & safety.** Runs are deterministic only under `BACKEND=stub`; the SDK
+> path defaults to `temperature=0` but the `claude` CLI backend has no reliable seed and is
+> non-deterministic by design. The runner **executes LLM-generated code on the host** — run
+> it only against trusted targets. Container-level isolation is future work.
 
 ## Adding your own target
 
@@ -299,22 +308,41 @@ installed (`pip install matplotlib`). Without it, the script falls back to a tin
 PNG writer that draws the curves but no axis tick labels — install matplotlib for the
 readable version.
 
+#### Repair any repo (CLI)
+
+Point the repair loop at a **buggy** function in any repo — no fixture, no answer key. It
+loads the source (local checkout path or GitHub URL, same as the mutation loop), repairs it
+iteratively, and reports fixes made + the suite kill-rate measured against mutants discovered
+from the corrected code:
+
+```bash
+python repair_main.py repo=<url-or-path> file=path/to/file.py function=my_fn
+```
+
+Python targets only for now (the repair internals — `ast`-based test mangling, the pytest
+runner — are Python-specific); a non-`.py` `file=` exits with a clear "Python only" message.
+Without `repo=`/`file=` it runs the built-in planted `grade` fixture as before.
+
 Deterministic offline run (stub backend, no model calls):
 
 ```
-$ LOOPIFY_BACKEND=sdk python repair_main.py
-one-shot baseline: fixed 1/3 bugs, tokens 269
-iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round
-        1               1716           1      0.333  B1_zero_total
-        2               3209           2      0.667  B2_clamp_high
-        3               4008           3      1.000  B3_clamp_low
-no further bugs reported at iteration 4
-loop fixed 3/3 planted bugs (graded), 3 tests in suite, log at repair_run.jsonl
+$ BACKEND=stub python repair_main.py
+blind one-shot baseline: fixed 1/3 bugs in 226 tokens (produces no tests)
+iter  cum_tokens  bugs_fixed   kill_rate  tests  note
+   1        1673        1/3      0.333      1  fixed via B1_zero_total
+   2        3424        1/3      0.333      1  no valid fix in 3 tries (1/3)
+   3        4944        2/3      0.667      2  fixed via B2_clamp_high
+   4        6787        2/3      0.667      2  no valid fix in 3 tries (1/3)
+   5        7638        3/3      1.000      3  fixed via B3_clamp_low
+all 3 planted bugs fixed and suite kills every regression at iter 5
+LOOP    : fixed 3/3 planted bugs, 3 regression tests, 100% kill-rate, 7638 tokens
+BASELINE: fixed 1/3 planted bugs, 0 regression tests, 226 tokens (blind one-shot)
+log at repair_run.jsonl
 ```
 
 This is the case for the loop: a single all-at-once "fix every defect" attempt patches
 the obvious `ZeroDivisionError` crash but misses the two subtler boundary clamps — **1/3
-bugs** for 269 tokens. The iterative loop's find → test → verify cycle closes all **3/3**,
+bugs** for 226 tokens. The iterative loop's find → test → verify cycle closes all **3/3**,
 trading more tokens for complete repair. In `repair_curve.png` the red ✕ (one-shot) sits
 at 1 bug while the blue line climbs to 3.
 
@@ -322,10 +350,10 @@ Two metrics climb together: **bugs fixed** (repair progress) and **suite kill-ra
 quality). Progress is appended to `repair_run.jsonl`, with the one-shot baseline in
 `repair_baseline.json`.
 
-> **Note:** `repair_main.py` sets `PYTHONDONTWRITEBYTECODE` in-process to work around a
-> stale-`.pyc` issue in the shared runner's reused temp dir (it rewrites `impl.py` per
-> mutant, so `import impl` can load cached bytecode and report wrong kills on multi-mutant
-> calls). The real fix belongs in `runner.py`; this avoids touching that frozen file.
+> **Note:** the shared runner rewrites `impl.py` per implementation in one reused temp dir,
+> so `import impl` could load cached bytecode and report a wrong kill on multi-mutant calls.
+> `runner.py` now runs each pytest subprocess with `PYTHONDONTWRITEBYTECODE=1`, so every
+> implementation always loads fresh source — no caller-side workaround needed.
 
 ## Orchestrated run (`orchestrate.py`)
 
@@ -346,22 +374,36 @@ python orchestrate.py
 Deterministic offline run (stub backend):
 
 ```
-$ LOOPIFY_BACKEND=sdk python orchestrate.py
+$ BACKEND=stub python orchestrate.py
 === PHASE 1: REPAIR (find & fix real bugs) ===
 ...
-loop fixed 3/3 planted bugs (graded), 3 tests in suite
+LOOP    : fixed 3/3 planted bugs, 3 regression tests, 100% kill-rate, 7638 tokens
 === PHASE 2: HARDEN (mutation-test the repaired code to plateau) ===
-harden          1               4336  bulk          1.000  0
+harden          1               7638  bulk          1.000  0
 === ORCHESTRATION COMPLETE ===
 repaired 3/3 planted bugs
 final suite kill-rate 1.000 (3 tests, stop: full-kill)
-total tokens 4336 (repair 4336 + harden 0)
+total tokens 7638 (repair 7638 + harden 0)
 ```
 
 `main.py` and `repair_main.py` stay usable standalone — the orchestrator just composes
 them via the shared contracts (it imports `run_repair` and reuses `generate_test` /
 `run_and_check`). Config: `ORCH_HARDEN_ITERS` (Phase 2 iteration cap, default 12) and
 `ORCH_TOKEN_CAP` (total-token budget across both phases, `0` disables).
+
+## Running the tests
+
+The harness has its own pytest suite under `tests/`. It runs fully offline (no network, no
+model calls) by pinning the deterministic stub backend:
+
+```bash
+BACKEND=stub pytest -q
+```
+
+It covers the runner's kill detection (including a multi-mutant regression test for the
+stale-`.pyc` bug), the kill-rate/plateau metrics, the repo/JSON/code parsers, the loud-failure
+contract (a real backend with no credentials raises rather than stubbing), and the repair
+loop's offline demo (3/3 planted bugs). TS/`npx`-dependent assertions skip when Node is absent.
 
 ## Roadmap
 

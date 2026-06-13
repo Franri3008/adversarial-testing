@@ -5,8 +5,6 @@ import re
 import sys
 from typing import Any, Dict, List, Optional
 
-os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1");
-
 from fixer import generate_fix
 from fixtures.buggy import BUGGY_SRC, MUTANTS as SEED_MUTANTS, ONESHOT_SRC, PLANTED_BUGS, REFERENCE_SRC
 from generator import generate_test
@@ -109,6 +107,9 @@ def _is_valid_mutant(mutant: Any) -> bool:
 
 
 def _fallback_mutants(code: str) -> List[Dict[str, Any]]:
+    # Offline (stub) fallback only: the planted `grade` fixture ships hand-written seed
+    # mutants so its deterministic demo can still harden. For any other target there is no
+    # offline mutant population — a real LLM backend discovers them generically above.
     if "def grade" in code:
         return list(SEED_MUTANTS)
     return []
@@ -197,15 +198,32 @@ def _oneshot_baseline(buggy_src: str, planted_bugs: List[Dict[str, Any]], onesho
     return {"bugs_fixed": fixed_count, "total_bugs": len(planted_bugs), "cumulative_tokens": tokens}
 
 
-def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], start_tokens: int = 0, verbose: bool = True, oneshot_src: Optional[str] = None) -> Dict[str, Any]:
+def run_repair(code: str, oracle_src: Optional[str] = None, planted_bugs: Optional[List[Dict[str, Any]]] = None, start_tokens: int = 0, verbose: bool = True, oneshot_src: Optional[str] = None, eval_mutants: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     buggy_src = code;
-    eval_mutants = list(SEED_MUTANTS);
-    seed_bugs = [{"id": bug["id"], "description": bug["description"], "target_name": bug["target_name"]} for bug in planted_bugs];
+    # Fixture mode (planted_bugs given) grades against a known answer key and measures the
+    # suite against a frozen mutant population on a frozen oracle. Generalized mode (CLI /
+    # arbitrary target) has neither: we report fixes made + the suite kill-rate measured by
+    # the per-fix hardening step against mutants discovered from the corrected code.
+    has_oracle = planted_bugs is not None;
+    if eval_mutants is None:
+        eval_mutants = list(SEED_MUTANTS) if has_oracle else [];
+    # Seed bugs also carry their offline (stub) test+fix so the deterministic demo can run
+    # with no model calls; a real backend ignores these and uses the model's own output.
+    seed_bugs = [{
+        "id": bug["id"],
+        "description": bug["description"],
+        "target_name": bug["target_name"],
+        "stub_test_src": bug.get("stub_test_src"),
+        "stub_fixed_src": bug.get("stub_fixed_src"),
+    } for bug in planted_bugs] if has_oracle else [];
 
-    baseline = _oneshot_baseline(buggy_src, planted_bugs, oneshot_src=oneshot_src);
-    if verbose:
-        print("blind one-shot baseline: fixed {}/{} bugs in {} tokens (produces no tests)".format(
-            baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+    if has_oracle:
+        baseline = _oneshot_baseline(buggy_src, planted_bugs, oneshot_src=oneshot_src);
+        if verbose:
+            print("blind one-shot baseline: fixed {}/{} bugs in {} tokens (produces no tests)".format(
+                baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+    else:
+        baseline = {"bugs_fixed": 0, "total_bugs": 0, "cumulative_tokens": 0};
 
     accepted_tests = [];
     fixed_bugs = [];
@@ -215,6 +233,7 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
     cumulative_tokens = start_tokens + baseline["cumulative_tokens"];
     fixes_made = 0;
     no_progress = 0;
+    last_harden_kr = 0.0;  # suite kill-rate from the most recent hardening step (generalized mode)
 
     if verbose:
         print("iter  cum_tokens  bugs_fixed   kill_rate  tests  note");
@@ -232,12 +251,12 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
             # Retry a few self-consistent test+fix pairs before giving up — one bad sample
             # must not permanently abandon a real, fixable bug.
             for attempt in range(RETRY_PER_BUG + 1):
-                gen = generate_bug_test(code, bug, role="strategy");
+                gen = generate_bug_test(code, bug, stub_test_src=bug.get("stub_test_src"), role="strategy");
                 cumulative_tokens += _token_count(gen["tokens"]);
                 test_src = gen["test_src"];
                 if not test_src:
                     continue
-                fix = generate_fix(code, bug, test_src, oracle_src=None, stub_fixed_src=None);
+                fix = generate_fix(code, bug, test_src, oracle_src=None, stub_fixed_src=bug.get("stub_fixed_src"));
                 cumulative_tokens += _token_count(fix["tokens"]);
                 fixed_src = fix["fixed_src"];
                 # Accept only if the new test exposes the bug (fails on old, passes on fixed)
@@ -254,22 +273,30 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
                 no_progress = 0;
                 note = "fixed via {}".format(bug["id"]);
                 mutants = _discover_mutants(code);
-                _, _, harden_tokens = _harden(code, accepted_tests, mutants, "{}_{}".format(bug["id"], iteration));
+                last_harden_kr, _, harden_tokens = _harden(code, accepted_tests, mutants, "{}_{}".format(bug["id"], iteration));
                 cumulative_tokens += harden_tokens;
             else:
                 no_progress += 1;
                 attempted.append({"id": bug["id"], "description": bug["description"]});
                 note = "no valid fix in {} tries ({}/{})".format(RETRY_PER_BUG + 1, no_progress, PATIENCE);
 
-        # Ground truth: grade against planted bugs (the loop never sees this), and measure the
-        # accumulated suite against a frozen mutant population on the oracle. Both are honest.
-        graded = _grade(code, buggy_src, planted_bugs);
-        kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
+        # Ground truth: in fixture mode grade against planted bugs (the loop never sees this)
+        # and measure the suite against a frozen mutant population on the oracle. In
+        # generalized mode there is no answer key — report fixes made and the suite kill-rate
+        # from the latest hardening pass. Both are honest about what they can measure.
+        if has_oracle:
+            graded = _grade(code, buggy_src, planted_bugs);
+            kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
+            total_display = len(planted_bugs);
+        else:
+            graded = fixes_made;
+            kill_rate = last_harden_kr;
+            total_display = fixes_made;
         entry = {
             "iteration": iteration,
             "cumulative_tokens": cumulative_tokens,
             "bugs_fixed": graded,
-            "total_bugs": len(planted_bugs),
+            "total_bugs": total_display,
             "kill_rate": kill_rate,
             "suite_size": len(accepted_tests),
             "fixes_made": fixes_made,
@@ -277,9 +304,9 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
         entries.append(entry);
         if verbose:
             print("{:>4}  {:>10}  {:>9}  {:>9.3f}  {:>5}  {}".format(
-                iteration, cumulative_tokens, "{}/{}".format(graded, len(planted_bugs)), kill_rate, len(accepted_tests), note));
+                iteration, cumulative_tokens, "{}/{}".format(graded, total_display), kill_rate, len(accepted_tests), note));
 
-        if graded >= len(planted_bugs) and kill_rate >= 1.0:
+        if has_oracle and graded >= len(planted_bugs) and kill_rate >= 1.0:
             if verbose:
                 print("all {} planted bugs fixed and suite kills every regression at iter {}".format(len(planted_bugs), iteration));
             break
@@ -288,13 +315,22 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
                 print("plateau: {} iterations without progress -> stop".format(PATIENCE));
             break
 
-    graded = _grade(code, buggy_src, planted_bugs);
-    kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
-    if verbose:
-        print("LOOP    : fixed {}/{} planted bugs, {} regression tests, {:.0%} kill-rate, {} tokens".format(
-            graded, len(planted_bugs), len(accepted_tests), kill_rate, cumulative_tokens));
-        print("BASELINE: fixed {}/{} planted bugs, 0 regression tests, {} tokens (blind one-shot)".format(
-            baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+    if has_oracle:
+        graded = _grade(code, buggy_src, planted_bugs);
+        kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
+        total_display = len(planted_bugs);
+        if verbose:
+            print("LOOP    : fixed {}/{} planted bugs, {} regression tests, {:.0%} kill-rate, {} tokens".format(
+                graded, len(planted_bugs), len(accepted_tests), kill_rate, cumulative_tokens));
+            print("BASELINE: fixed {}/{} planted bugs, 0 regression tests, {} tokens (blind one-shot)".format(
+                baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+    else:
+        graded = fixes_made;
+        kill_rate = last_harden_kr;
+        total_display = fixes_made;
+        if verbose:
+            print("LOOP    : made {} fixes, {} regression tests, {:.0%} suite kill-rate, {} tokens".format(
+                fixes_made, len(accepted_tests), kill_rate, cumulative_tokens));
     return {
         "buggy_src": buggy_src,
         "final_code": code,
@@ -305,12 +341,45 @@ def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], s
         "baseline": baseline,
         "entries": entries,
         "graded": graded,
-        "total_bugs": len(planted_bugs),
+        "total_bugs": total_display,
     }
 
 
+def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {};
+    for arg in argv:
+        if "=" in arg:
+            key, _, value = arg.partition("=");
+            out[key.strip()] = value.strip();
+    return out
+
+
+def _resolve_repair_target():
+    """CLI mode (repo=/file=/function=) loads a buggy source from a real repo and runs the
+    loop without an answer key. Otherwise fall back to the built-in planted fixture."""
+    kwargs = _parse_kwargs(sys.argv[1:]);
+    if kwargs.get("repo") or kwargs.get("file"):
+        from acquire import _language_for, fetch_file
+
+        missing = [k for k in ("repo", "file", "function") if not kwargs.get(k)];
+        if missing:
+            raise SystemExit("repair CLI mode needs: repo=, file=, function= (missing: {})".format(missing));
+        language = _language_for(kwargs["file"]);
+        if language != "python":
+            raise SystemExit("repair mode supports Python targets only (TS repair is roadmap); got {}".format(language));
+        buggy_src = fetch_file(kwargs["repo"], kwargs["file"]);
+        fn = kwargs["function"];
+        if not re.search(r"^\s*def\s+{}\s*\(".format(re.escape(fn)), buggy_src, re.MULTILINE):
+            print("[repair] warning: `def {}` not found in {}; relying on model-reported target".format(fn, kwargs["file"]));
+        print("[repair] {} :: {} (python), target `{}`".format(kwargs["repo"], kwargs["file"], fn));
+        # No oracle / planted bugs for an arbitrary target: report fixes + suite kill-rate.
+        return run_repair(buggy_src, oracle_src=None, planted_bugs=None);
+
+    return run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS, oneshot_src=ONESHOT_SRC, eval_mutants=list(SEED_MUTANTS));
+
+
 def main() -> None:
-    result = run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS, oneshot_src=ONESHOT_SRC);
+    result = _resolve_repair_target();
     logger = JsonlLogger(LOG_PATH);
     with open(BASELINE_PATH, "w") as handle:
         json.dump(result["baseline"], handle);

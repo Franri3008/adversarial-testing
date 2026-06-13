@@ -68,6 +68,9 @@ CLAUDE_UNSUPPORTED_KWARGS = ("temperature", "top_p", "top_k");
 # Backend transport. "cli" runs the local `claude -p` (uses the machine's Claude Code
 # auth/gateway — no SDK install, no API key needed), which is what makes this loop
 # runnable on a laptop out of the box. "sdk" uses the original anthropic/openai paths.
+# "stub" is the explicit offline backend: it returns a deterministic STUB_COMPLETION for
+# every call (no network). The repair helpers branch on that sentinel to fall back to
+# their seed bugs / oracle fixes, so `BACKEND=stub` drives the reproducible offline demo.
 BACKEND = os.environ.get("BACKEND", "cli");
 CLI_MODELS = {
     "strategy": os.environ.get("STRATEGY_MODEL", "opus"),
@@ -133,6 +136,8 @@ def _complete_strategy(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[
         raise RuntimeError("ANTHROPIC_APIKEY not set");
     import anthropic
     client = anthropic.Anthropic(api_key=api_key);
+    # temperature/top_p/top_k are intentionally stripped (CLAUDE_UNSUPPORTED_KWARGS) — some
+    # Claude models reject a non-default temperature, so we leave decoding to the API default.
     params = {k: v for k, v in kwargs.items() if k not in CLAUDE_UNSUPPORTED_KWARGS};
     max_tokens = params.pop("max_tokens", DEFAULT_MAX_TOKENS);
     response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}], **params);
@@ -149,6 +154,8 @@ def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str,
     import openai
     client = openai.OpenAI(api_key=api_key, base_url=base_url);
     params = dict(kwargs);
+    # Greedy decoding by default for reproducible runs (callers may override).
+    params.setdefault("temperature", 0);
     max_tokens = params.pop("max_tokens", DEFAULT_MAX_TOKENS);
     response = client.chat.completions.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}], **params);
     text = response.choices[0].message.content or "";
@@ -159,6 +166,13 @@ def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str,
 
 def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, Any]:
     model = resolve_model(role);
+    # Explicit offline backend: deterministic STUB_COMPLETION, no network. The only path
+    # that is allowed to return a stub.
+    if BACKEND == "stub":
+        return _stub(prompt, model)
+    # Real backends fail LOUD: an auth/rate-limit/transport error must surface, not be
+    # silently swallowed into a stub that looks like a legitimate (empty) result. Use
+    # BACKEND=stub if you want the offline path.
     try:
         if BACKEND == "cli":
             return _complete_cli(prompt, role)
@@ -168,5 +182,8 @@ def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, An
             return _complete_bulk(prompt, STRATEGY_NEBIUS_MODEL, kwargs)
         return _complete_strategy(prompt, model, kwargs)
     except Exception as exc:
-        _warn("{} call failed ({}: {}); using stub fallback".format(role, type(exc).__name__, exc));
-        return _stub(prompt, model)
+        raise RuntimeError(
+            "{} call failed under BACKEND={} ({}: {}). "
+            "Fix the backend/credentials, or set BACKEND=stub for the offline path.".format(
+                role, BACKEND, type(exc).__name__, exc)
+        ) from exc
