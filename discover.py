@@ -9,10 +9,12 @@ Returns fixture-shaped targets the existing loop already understands, one per fu
 """
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
 import subprocess
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
@@ -27,9 +29,36 @@ TS_FN = re.compile(r"export\s+(?:async\s+)?function\s+(\w+)\s*\(")
 BRANCH = re.compile(r"(\bif\b|\bfor\b|\bwhile\b|\belif\b|\bcase\b|\bcatch\b|\bexcept\b|\bswitch\b|\breturn\b|\?\.|&&|\|\|)")
 
 
+def _build_logger() -> logging.Logger:
+    """A pretty, loggable channel for discover output.
+
+    Console gets a timestamped, tagged line; set ADVERSARIAL_LOG_FILE to also append every
+    line to a file. Configured once and idempotent so importing this module twice is safe.
+    """
+    log = logging.getLogger("adversarial.discover");
+    if getattr(log, "_configured", False):
+        return log
+    log.setLevel(logging.INFO);
+    log.propagate = False;
+    fmt = logging.Formatter("%(asctime)s [discover] %(message)s", datefmt="%H:%M:%S");
+    console = logging.StreamHandler();
+    console.setFormatter(fmt);
+    log.addHandler(console);
+    log_file = os.environ.get("ADVERSARIAL_LOG_FILE");
+    if log_file:
+        file_handler = logging.FileHandler(Path(log_file).expanduser(), encoding="utf-8");
+        file_handler.setFormatter(logging.Formatter("%(asctime)s [discover] %(message)s"));
+        log.addHandler(file_handler);
+    log._configured = True;  # type: ignore[attr-defined]
+    return log
+
+
+logger = _build_logger()
+
+
 def _log(verbose: bool, message: str) -> None:
     if verbose:
-        print("[discover] " + message);
+        logger.info(message);
 
 
 def _cache_root() -> Path:
@@ -200,18 +229,27 @@ def discover_targets(
         _log(verbose, "{} eligible function(s); ranking by complexity".format(len(candidates)));
 
         # Pass 2: generate mutants best-first, stopping at max_targets.
-        for c in candidates:
+        planned = min(max_targets, len(candidates)) if max_targets else len(candidates);
+        for i, c in enumerate(candidates):
             if max_targets and len(targets) >= max_targets:
                 _log(verbose, "reached max_targets={} -> stopping".format(max_targets));
                 break
+            fn = "{}::{}".format(c["rel"], c["name"]);
+            _log(verbose, "[{}/{}] → generating {} mutants for {} (score {})  [LLM]…".format(
+                len(targets) + 1, planned, mutants_per, fn, c["score"]));
+            started = time.perf_counter();
             try:
                 mutants = acquire.generate_mutants(c["src"], c["name"], c["language"], mutants_per);
             except Exception as exc:
-                _log(verbose, "skipping {}::{} (mutant-gen failed: {})".format(c["rel"], c["name"], exc));
+                _log(verbose, "    ✗ {} skipped after {:.1f}s (mutant-gen failed: {})".format(
+                    fn, time.perf_counter() - started, exc));
                 continue
             if not mutants:
+                _log(verbose, "    ✗ {} skipped after {:.1f}s (no valid mutants)".format(
+                    fn, time.perf_counter() - started));
                 continue
             targets.append((c["rel"], acquire.Target(c["src"], mutants, c["language"], c["name"])));
-            _log(verbose, "target {}::{} (score {}, {} mutants)".format(c["rel"], c["name"], c["score"], len(mutants)));
+            _log(verbose, "    ✓ {}  {} mutants in {:.1f}s".format(
+                fn, len(mutants), time.perf_counter() - started));
     _log(verbose, "{} target(s) with valid mutants".format(len(targets)));
     return targets
