@@ -22,14 +22,20 @@ def _clues(surviving: List[Dict[str, Any]]) -> str:
 
 def _build_prompt_python(reference_src: str, fn: str, surviving: List[Dict[str, Any]]) -> str:
     return (
-        "You are writing an adversarial pytest test for mutation testing.\n"
-        "The function under test is `{fn}` and is provided as a pytest FIXTURE, so your "
-        "test MUST take `{fn}` as a parameter and call it (do not import or redefine it).\n\n"
-        "Write ONE test function with several assertions that PASS on the correct "
-        "implementation but would FAIL on implementations exhibiting these bugs:\n"
-        "{clues}\n\n"
-        "Correct reference implementation (for behavior, do not copy into the test):\n"
-        "```python\n{ref}\n```\n\n"
+        "You are the DEFENDER in a mutation-testing loop: you write tests that catch bugs.\n"
+        "Write ONE pytest test function for `{fn}` whose assertions PASS on the correct\n"
+        "implementation but FAIL on any implementation carrying one of the target bugs below.\n\n"
+        "Rules (hard requirements):\n"
+        "- `{fn}` is supplied as a pytest FIXTURE. Your test MUST take `{fn}` as a parameter\n"
+        "  and call it. NEVER import or redefine it.\n"
+        "- Every assertion MUST pass on the correct reference. A test that fails on the\n"
+        "  reference is wasted — the loop discards it as a false alarm.\n"
+        "- Assert concrete expected outputs you work out from the intended behavior; do NOT\n"
+        "  paste the reference implementation into the test. Target the specific bugs: pick\n"
+        "  inputs that exercise the edge cases they describe (boundaries, empty/invalid input,\n"
+        "  error paths), not just the happy path.\n\n"
+        "<target_bugs>\n{clues}\n</target_bugs>\n\n"
+        "<reference language=\"python\">\n{ref}\n</reference>\n\n"
         "Output ONLY the test code in a single ```python code block. No prose."
     ).format(fn=fn, clues=_clues(surviving), ref=reference_src)
 
@@ -41,16 +47,21 @@ def _build_prompt_typescript(
     import_path: str = "./impl",
 ) -> str:
     return (
-        "You are writing an adversarial vitest test (TypeScript) for mutation testing.\n"
-        "Import the function under test with `import {{ {fn} }} from \"{import_path}\";` and import "
-        "`test` and `expect` from \"vitest\". Do not redefine the function.\n\n"
-        "Write ONE test with several assertions that PASS on the correct implementation but "
-        "would FAIL on implementations exhibiting these bugs:\n"
-        "{clues}\n\n"
-        "For inputs that must be rejected, assert it throws: "
-        "`expect(() => {fn}(x)).toThrow();`\n\n"
-        "Correct reference implementation (for behavior, do not copy into the test):\n"
-        "```typescript\n{ref}\n```\n\n"
+        "You are the DEFENDER in a mutation-testing loop: you write tests that catch bugs.\n"
+        "Write ONE vitest test (TypeScript) for `{fn}` whose assertions PASS on the correct\n"
+        "implementation but FAIL on any implementation carrying one of the target bugs below.\n\n"
+        "Rules (hard requirements):\n"
+        "- Import the function with `import {{ {fn} }} from \"{import_path}\";` and import\n"
+        "  `test` and `expect` from \"vitest\". NEVER redefine the function.\n"
+        "- Every assertion MUST pass on the correct reference. A test that fails on the\n"
+        "  reference is wasted — the loop discards it as a false alarm.\n"
+        "- For inputs that must be rejected, assert it throws: "
+        "`expect(() => {fn}(x)).toThrow();`\n"
+        "- Assert concrete expected outputs you work out from the intended behavior; do NOT\n"
+        "  paste the reference implementation in. Target the specific bugs (boundaries,\n"
+        "  empty/invalid input, error paths), not just the happy path.\n\n"
+        "<target_bugs>\n{clues}\n</target_bugs>\n\n"
+        "<reference language=\"typescript\">\n{ref}\n</reference>\n\n"
         "Output ONLY the test code in a single ```typescript code block. No prose."
     ).format(fn=fn, import_path=import_path, clues=_clues(surviving), ref=reference_src)
 
