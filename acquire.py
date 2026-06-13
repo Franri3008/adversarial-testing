@@ -120,7 +120,35 @@ def _extract_json_array(text: str) -> List[dict]:
     m = re.search(r"\[.*\]", text, re.DOTALL)
     if not m:
         raise ValueError(f"no JSON array in mutant output: {text[:200]!r}")
-    return json.loads(m.group(0))
+    blob = m.group(0)
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        # The response was likely truncated (output token cap) mid-string, so the
+        # greedy regex closed on a stray ']' inside the source. Salvage every
+        # complete object we can with a streaming decoder instead of crashing.
+        salvaged = _salvage_objects(blob)
+        if not salvaged:
+            raise
+        print(f"[acquire] recovered {len(salvaged)} mutant(s) from a truncated response")
+        return salvaged
+
+
+def _salvage_objects(blob: str) -> List[dict]:
+    """Decode as many leading top-level JSON objects from an array as possible."""
+    decoder = json.JSONDecoder()
+    objs: List[dict] = []
+    i = blob.find("{")
+    while i != -1:
+        try:
+            obj, end = decoder.raw_decode(blob, i)
+        except json.JSONDecodeError:
+            break  # hit the truncated tail
+        if isinstance(obj, dict):
+            objs.append(obj)
+        # advance to the next '{' after this object
+        i = blob.find("{", end)
+    return objs
 
 
 def _compiles_fn(language: str):
@@ -135,7 +163,11 @@ def generate_mutants(
     reference_src: str, function_name: str, language: str, n: int
 ) -> List[Dict[str, Any]]:
     prompt = _MUTANT_PROMPT.format(language=language, fn=function_name, n=n, ref=reference_src)
-    response = llm.complete(prompt, role="strategy")
+    # Each mutant is a full copy of the source; with JSON-escaping (newlines -> \n)
+    # the output is ~2x the raw chars. Budget for n copies + overhead so the
+    # response is not truncated mid-string (which corrupts the JSON).
+    max_tokens = max(4096, int(len(reference_src) / 4 * n * 2) + 1024)
+    response = llm.complete(prompt, role="strategy", max_tokens=max_tokens)
     candidates = _extract_json_array(response["text"])
 
     compiles = _compiles_fn(language)

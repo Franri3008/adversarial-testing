@@ -24,10 +24,9 @@ def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
     return out
 
 
-def _resolve_target():
+def resolve_target(kwargs: Dict[str, str]):
     """CLI mode (repo=/file=/function=) acquires a target from a real repo;
     otherwise fall back to a built-in fixture (FIXTURE)."""
-    kwargs = _parse_kwargs(sys.argv[1:])
     if kwargs.get("repo") or kwargs.get("file"):
         from acquire import acquire_target
 
@@ -61,7 +60,8 @@ def _get_runner(language: str, runner: Optional[str] = None):
 
 
 def main() -> None:
-    reference_src, mutants, language, function_name, runner, test_import_path = _resolve_target()
+    kwargs = _parse_kwargs(sys.argv[1:])
+    reference_src, mutants, language, function_name, runner, test_import_path = resolve_target(kwargs)
     run_and_check = _get_runner(language, runner)
 
     # Bind language/function so generation works for both fixture and CLI targets.
@@ -87,6 +87,9 @@ def main() -> None:
     cumulative_cost = 0.0
     kill_rates = []
     role_idx = 0
+    suite_sources = []
+    strategy_model = ""
+    bulk_model = ""
 
     print("iter  tier      cum_tokens   cost$    kill_rate  killed_this_round")
     for iteration in range(1, MAX_ITERATIONS + 1):
@@ -95,8 +98,13 @@ def main() -> None:
         cumulative_tokens += gen["tokens"]["in"] + gen["tokens"]["out"]
         cumulative_cost += gen.get("cost", 0.0)
 
+        bulk_model = gen.get("model", bulk_model) if role == "bulk" else bulk_model
+        strategy_model = gen.get("model", strategy_model) if role == "strategy" else strategy_model
+
         result = run_and_check(gen["test_src"], reference_src, surviving)
         killed_this_round = result["killed_mutant_ids"] if result["reference_passed"] else []
+        if result["reference_passed"] and killed_this_round:
+            suite_sources.append(gen["test_src"])
         for mid in killed_this_round:
             killed_total.add(mid)
         surviving = [m for m in surviving if m["id"] not in killed_total]
@@ -140,6 +148,20 @@ def main() -> None:
     final = compute_kill_rate(len(killed_total), total)
     print("final kill_rate={:.3f} over {} mutants, cost=${:.4f}, log at {}".format(
         final, total, cumulative_cost, LOG_PATH))
+
+    import report
+    meta = {
+        "repo": kwargs.get("repo", "(built-in fixture)"),
+        "file": kwargs.get("file", "-"),
+        "function": function_name or kwargs.get("function", "-"),
+        "language": language,
+        "strategy_model": strategy_model or "-",
+        "bulk_model": bulk_model or "-",
+        "total_mutants": total,
+        "surviving": surviving,
+    }
+    report_path = report.write_report(meta, logger.entries, suite_sources, baseline=baseline)
+    print("report at {}".format(report_path))
 
 
 if __name__ == "__main__":
