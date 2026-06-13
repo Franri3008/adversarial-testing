@@ -6,19 +6,18 @@ import llm
 
 def _build_prompt(code: str, bug: Dict[str, Any], failing_test: str) -> str:
     return (
-        "You are the repair agent in an automatic bug-fixing loop.\n"
-        "Rewrite the source so the described bug is fixed and the failing test passes.\n"
-        "Hard constraints:\n"
-        "- Change only what is needed to fix the described defect.\n"
-        "- Preserve every public function name and signature.\n"
-        "- Return the complete corrected module source.\n"
-        "- Return only Python source code, no markdown fences.\n\n"
-        "Bug to fix: "
-        + bug.get("description", "")
-        + "\n\nFailing test that must pass after the fix:\n"
-        + failing_test
-        + "\n\nCurrent source:\n"
-        + code
+        "You are the repair agent in an automatic bug-fixing loop. Rewrite the module so the\n"
+        "described bug is fixed and the failing test passes.\n\n"
+        "Hard requirements:\n"
+        "- Fix ONLY the described defect, with the smallest change that does so. Do not\n"
+        "  refactor, rename, reformat, or alter any behavior unrelated to the bug.\n"
+        "- Preserve every public function name and signature exactly.\n"
+        "- Do NOT modify the test. The fix must make the given test pass as written.\n"
+        "- Return the COMPLETE corrected module source. Python only — no markdown fences,\n"
+        "  no prose.\n\n"
+        "<bug>\n" + bug.get("description", "") + "\n</bug>\n\n"
+        "<failing_test>\n" + failing_test + "\n</failing_test>\n\n"
+        "<source>\n" + code + "\n</source>"
     )
 
 
