@@ -18,6 +18,8 @@ from strategy import find_bug
 
 MAX_ITERATIONS = 12;
 HARDEN_ATTEMPTS = 3;
+RETRY_PER_BUG = 2;
+PATIENCE = 3;
 LOG_PATH = "repair_run.jsonl";
 BASELINE_PATH = "repair_baseline.json";
 
@@ -113,7 +115,7 @@ def _fallback_mutants(code: str) -> List[Dict[str, Any]]:
 
 
 def _discover_mutants(code: str) -> List[Dict[str, Any]]:
-    response = llm.complete(_build_discovery_prompt(code), role="strategy");
+    response = llm.complete(_build_discovery_prompt(code), role="bulk");
     text = response.get("text", "");
     if text.strip() == "STUB_COMPLETION":
         return _fallback_mutants(code)
@@ -144,6 +146,20 @@ def _passes_on_correct(test_src: str, code: str) -> bool:
     return bool(result["reference_passed"])
 
 
+def _suite_passes(tests: List[str], code: str) -> bool:
+    if not tests:
+        return True
+    return _passes_on_correct(_suite_text(tests), code)
+
+
+def _eval_kill_rate(tests: List[str], oracle_src: str, eval_mutants: List[Dict[str, Any]]) -> float:
+    if not tests or not eval_mutants:
+        return 0.0
+    result = runner.run_and_check(_suite_text(tests), oracle_src, eval_mutants);
+    killed = set(result["killed_mutant_ids"]) if result["reference_passed"] else set();
+    return compute_kill_rate(len(killed), len(eval_mutants))
+
+
 def _harden(code: str, suite_sources: List[str], mutants: List[Dict[str, Any]], tag: str):
     tokens = 0;
     kill_rate, surviving = _measure_kill_rate(code, suite_sources, mutants);
@@ -168,10 +184,13 @@ def _grade(code: str, buggy_src: str, planted_bugs: List[Dict[str, Any]]) -> int
     return fixed
 
 
-def _oneshot_baseline(buggy_src: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], oneshot_src: Optional[str] = None) -> Dict[str, Any]:
-    combined = {"description": "Fix every defect so the function behaves correctly.", "target_name": _function_name(buggy_src)};
-    suite = _suite_text([_mangle(bug["stub_test_src"], bug["id"]) for bug in planted_bugs]);
-    fix = generate_fix(buggy_src, combined, suite, oracle_src=oracle_src, stub_fixed_src=oneshot_src or oracle_src);
+def _oneshot_baseline(buggy_src: str, planted_bugs: List[Dict[str, Any]], oneshot_src: Optional[str] = None) -> Dict[str, Any]:
+    # Blind one-shot: the SAME information the loop starts with — just the buggy code and an
+    # instruction to fix it. No answer-key tests, no oracle crutch on the live path; this is the
+    # fair comparison point. oneshot_src is used ONLY as the offline (stub) fallback so the demo
+    # still produces a baseline when no LLM is reachable.
+    combined = {"description": "Find and fix every bug so the function is correct and robust for all inputs, including invalid arguments and boundary values.", "target_name": _function_name(buggy_src)};
+    fix = generate_fix(buggy_src, combined, "", oracle_src=None, stub_fixed_src=oneshot_src);
     fixed_src = fix["fixed_src"];
     tokens = _token_count(fix["tokens"]);
     fixed_count = _grade(fixed_src, buggy_src, planted_bugs);
@@ -180,74 +199,108 @@ def _oneshot_baseline(buggy_src: str, oracle_src: str, planted_bugs: List[Dict[s
 
 def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], start_tokens: int = 0, verbose: bool = True, oneshot_src: Optional[str] = None) -> Dict[str, Any]:
     buggy_src = code;
+    eval_mutants = list(SEED_MUTANTS);
     seed_bugs = [{"id": bug["id"], "description": bug["description"], "target_name": bug["target_name"]} for bug in planted_bugs];
-    stub_tests = {bug["id"]: bug["stub_test_src"] for bug in planted_bugs};
-    stub_fixes = {bug["id"]: bug["stub_fixed_src"] for bug in planted_bugs};
 
-    baseline = _oneshot_baseline(buggy_src, oracle_src, planted_bugs, oneshot_src=oneshot_src);
+    baseline = _oneshot_baseline(buggy_src, planted_bugs, oneshot_src=oneshot_src);
     if verbose:
-        print("one-shot baseline: fixed {}/{} bugs, tokens {}".format(baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+        print("blind one-shot baseline: fixed {}/{} bugs in {} tokens (produces no tests)".format(
+            baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
 
-    suite_sources = [];
-    bugs_fixed = [];
-    failed_attempts = [];
+    accepted_tests = [];
+    fixed_bugs = [];
+    fixed_descriptions = [];
+    attempted = [];
     entries = [];
     cumulative_tokens = start_tokens + baseline["cumulative_tokens"];
+    fixes_made = 0;
+    no_progress = 0;
 
     if verbose:
-        print("iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round");
+        print("iter  cum_tokens  bugs_fixed   kill_rate  tests  note");
     for iteration in range(1, MAX_ITERATIONS + 1):
-        observation = _build_observation(code, bugs_fixed, failed_attempts, seed_bugs, cumulative_tokens);
+        observation = _build_observation(code, [{"id": "", "description": d} for d in fixed_descriptions], attempted, seed_bugs, cumulative_tokens);
         decision = find_bug(observation);
         cumulative_tokens += _token_count(decision["tokens"]);
-        if not decision["should_continue"] or not decision["has_bug"]:
-            if verbose:
-                print("no further bugs reported at iteration {}".format(iteration));
-            break
 
-        bug = decision["bug"];
-        gen = generate_bug_test(code, bug, stub_test_src=stub_tests.get(bug["id"]));
-        cumulative_tokens += _token_count(gen["tokens"]);
-        test_src = gen["test_src"];
+        if not decision["has_bug"]:
+            no_progress += 1;
+            note = "model reports no bug ({}/{})".format(no_progress, PATIENCE);
+        else:
+            bug = decision["bug"];
+            accepted = False;
+            # Retry a few self-consistent test+fix pairs before giving up — one bad sample
+            # must not permanently abandon a real, fixable bug.
+            for attempt in range(RETRY_PER_BUG + 1):
+                gen = generate_bug_test(code, bug, role="strategy");
+                cumulative_tokens += _token_count(gen["tokens"]);
+                test_src = gen["test_src"];
+                if not test_src:
+                    continue
+                fix = generate_fix(code, bug, test_src, oracle_src=None, stub_fixed_src=None);
+                cumulative_tokens += _token_count(fix["tokens"]);
+                fixed_src = fix["fixed_src"];
+                # Accept only if the new test exposes the bug (fails on old, passes on fixed)
+                # AND the fix breaks none of the already-accepted tests (no-regression gate).
+                if _verify_fix(test_src, fixed_src, code, bug["id"], bug["description"]) and _suite_passes(accepted_tests, fixed_src):
+                    code = fixed_src;
+                    accepted_tests.append(_mangle(test_src, "{}_{}".format(bug["id"], iteration)));
+                    fixed_descriptions.append(bug["description"]);
+                    fixed_bugs.append(bug);
+                    fixes_made += 1;
+                    accepted = True;
+                    break
+            if accepted:
+                no_progress = 0;
+                note = "fixed via {}".format(bug["id"]);
+                mutants = _discover_mutants(code);
+                _, _, harden_tokens = _harden(code, accepted_tests, mutants, "{}_{}".format(bug["id"], iteration));
+                cumulative_tokens += harden_tokens;
+            else:
+                no_progress += 1;
+                attempted.append({"id": bug["id"], "description": bug["description"]});
+                note = "no valid fix in {} tries ({}/{})".format(RETRY_PER_BUG + 1, no_progress, PATIENCE);
 
-        fix = generate_fix(code, bug, test_src, oracle_src=oracle_src, stub_fixed_src=stub_fixes.get(bug["id"]));
-        cumulative_tokens += _token_count(fix["tokens"]);
-        fixed_src = fix["fixed_src"];
-
-        if not _verify_fix(test_src, fixed_src, code, bug["id"], bug["description"]):
-            failed_attempts.append({"id": bug["id"], "description": bug["description"]});
-            if verbose:
-                print("{:>9}  {:>17}  {:>10}  {:>9}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), "-", "rejected:" + bug["id"]));
-            continue
-
-        code = fixed_src;
-        suite_sources.append(_mangle(test_src, bug["id"]));
-        bugs_fixed.append(bug);
-
-        mutants = _discover_mutants(code);
-        kill_rate, surviving, harden_tokens = _harden(code, suite_sources, mutants, bug["id"]);
-        cumulative_tokens += harden_tokens;
-
+        # Ground truth: grade against planted bugs (the loop never sees this), and measure the
+        # accumulated suite against a frozen mutant population on the oracle. Both are honest.
+        graded = _grade(code, buggy_src, planted_bugs);
+        kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
         entry = {
             "iteration": iteration,
             "cumulative_tokens": cumulative_tokens,
-            "bugs_fixed": len(bugs_fixed),
+            "bugs_fixed": graded,
+            "total_bugs": len(planted_bugs),
             "kill_rate": kill_rate,
-            "fixed_this_round": bug["id"],
+            "suite_size": len(accepted_tests),
+            "fixes_made": fixes_made,
         };
         entries.append(entry);
         if verbose:
-            print("{:>9}  {:>17}  {:>10}  {:>9.3f}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), kill_rate, bug["id"]));
+            print("{:>4}  {:>10}  {:>9}  {:>9.3f}  {:>5}  {}".format(
+                iteration, cumulative_tokens, "{}/{}".format(graded, len(planted_bugs)), kill_rate, len(accepted_tests), note));
+
+        if graded >= len(planted_bugs) and kill_rate >= 1.0:
+            if verbose:
+                print("all {} planted bugs fixed and suite kills every regression at iter {}".format(len(planted_bugs), iteration));
+            break
+        if no_progress >= PATIENCE:
+            if verbose:
+                print("plateau: {} iterations without progress -> stop".format(PATIENCE));
+            break
 
     graded = _grade(code, buggy_src, planted_bugs);
+    kill_rate = _eval_kill_rate(accepted_tests, oracle_src, eval_mutants);
     if verbose:
-        print("loop fixed {}/{} planted bugs (graded), {} tests in suite".format(graded, len(planted_bugs), len(suite_sources)));
+        print("LOOP    : fixed {}/{} planted bugs, {} regression tests, {:.0%} kill-rate, {} tokens".format(
+            graded, len(planted_bugs), len(accepted_tests), kill_rate, cumulative_tokens));
+        print("BASELINE: fixed {}/{} planted bugs, 0 regression tests, {} tokens (blind one-shot)".format(
+            baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
     return {
         "buggy_src": buggy_src,
         "final_code": code,
-        "suite_sources": suite_sources,
-        "bugs_fixed": bugs_fixed,
-        "failed_attempts": failed_attempts,
+        "suite_sources": accepted_tests,
+        "bugs_fixed": fixed_bugs,
+        "failed_attempts": attempted,
         "cumulative_tokens": cumulative_tokens,
         "baseline": baseline,
         "entries": entries,
