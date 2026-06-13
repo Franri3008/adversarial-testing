@@ -1,5 +1,6 @@
 import os
 import sys
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional
 
 from generator import generate_test
@@ -31,6 +32,13 @@ TOKEN_CAP = int(os.environ.get("TOKEN_CAP", "0"))            # 0 disables
 # old one-shot behaviour (harden a fixed mutant set, then stop).
 MUTANT_ROUNDS = int(os.environ.get("MUTANT_ROUNDS", "3"))
 MUTANTS_PER_ROUND = int(os.environ.get("MUTANTS_PER_ROUND", "5"))
+
+# Repo scan fans out one harden_target per discovered function. Threads work because
+# each call is dominated by subprocess pytest runs and LLM HTTP I/O. Auto-tuned from
+# CPU count; each target also fans out per-mutant via MUTANT_WORKERS, so we keep this
+# modest (combined fan-out is TARGET_WORKERS * MUTANT_WORKERS pytest subprocesses).
+_DEFAULT_TARGET_WORKERS = max(1, min((os.cpu_count() or 4) // 2, 4))
+TARGET_WORKERS = max(1, int(os.environ.get("TARGET_WORKERS", str(_DEFAULT_TARGET_WORKERS))))
 
 
 def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
@@ -251,6 +259,8 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
         "strategy_model": strategy_model or "-",
         "bulk_model": bulk_model or "-",
         "stop_reason": stop_reason,
+        "cumulative_cost": cumulative_cost,
+        "cumulative_tokens": cumulative_tokens,
     }
 
 
@@ -266,16 +276,30 @@ def _run_repo_scan(kwargs: Dict[str, str]) -> None:
     if not targets:
         raise SystemExit("no eligible self-contained functions found in {}".format(kwargs["repo"]))
 
-    results = []
-    for index, (rel, t) in enumerate(targets, start=1):
-        label = "{}/{} {}::{}".format(index, len(targets), rel, t.function_name)
-        print("\n=== TARGET {} ===".format(label))
+    indexed = list(enumerate(targets, start=1))
+    workers = min(TARGET_WORKERS, len(indexed))
+    print("hardening {} targets with {} parallel worker(s)".format(len(indexed), workers))
+
+    def _run_one(item):
+        index, (rel, t) = item
         res = harden_target(
             t.reference_src, t.mutants, t.language, t.function_name,
-            log_path="run_{:02d}.jsonl".format(index), label="{}::{}".format(rel, t.function_name))
+            log_path="run_{:02d}.jsonl".format(index),
+            label="{}::{}".format(rel, t.function_name))
         res["file"] = rel
-        results.append(res)
+        return index, res
 
+    by_index: Dict[int, dict] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_run_one, item): item[0] for item in indexed}
+        for fut in as_completed(futures):
+            index, res = fut.result()
+            by_index[index] = res
+            print("[done {}/{}] {}::{} kill_rate={:.3f} cost=${:.4f}".format(
+                index, len(indexed), res["file"], res["function_name"],
+                res["final"], res.get("cumulative_cost", 0.0)))
+
+    results = [by_index[i] for i in sorted(by_index)]
     report_path = report.write_repo_report(kwargs["repo"], results)
     print("\nrepo report at {}".format(report_path))
 

@@ -19,10 +19,16 @@ import re
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Dict, List
 
 PYTEST_TIMEOUT = 30  # seconds per implementation
+# Auto-tune the per-mutant pytest fan-out from CPU count (mostly subprocess
+# spawn + short test execution, so light oversubscription is fine). Cap at 8
+# to keep combined fan-out with TARGET_WORKERS sane on big boxes.
+_DEFAULT_MUTANT_WORKERS = min(os.cpu_count() or 4, 8)
+MUTANT_WORKERS = max(1, int(os.environ.get("MUTANT_WORKERS", str(_DEFAULT_MUTANT_WORKERS))))
 
 
 def _function_name(reference_src: str) -> str:
@@ -78,6 +84,12 @@ def compiles(impl_src: str, function_name: str) -> bool:
         return _pytest_passes(Path(tmp), impl_src, smoke, function_name)
 
 
+def _check_mutant(mutant: Dict[str, Any], test_src: str, fn: str) -> bool:
+    """Return True iff the test passes on this mutant (i.e. the mutant survived)."""
+    with tempfile.TemporaryDirectory(prefix="mut-m-") as tmp:
+        return _pytest_passes(Path(tmp), mutant["src"], test_src, fn)
+
+
 def run_and_check(
     test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
 ) -> Dict[str, Any]:
@@ -86,19 +98,20 @@ def run_and_check(
 
     fn = _function_name(reference_src)
 
-    with tempfile.TemporaryDirectory(prefix="mut-") as tmp:
-        workdir = Path(tmp)
-
-        # 1) The test must PASS on the correct reference, else it's a bad test and
-        #    we trust none of its kills.
-        reference_passed = _pytest_passes(workdir, reference_src, test_src, fn)
-        if not reference_passed:
+    # 1) The test must PASS on the correct reference, else it's a bad test and
+    #    we trust none of its kills.
+    with tempfile.TemporaryDirectory(prefix="mut-ref-") as tmp:
+        if not _pytest_passes(Path(tmp), reference_src, test_src, fn):
             return {"reference_passed": False, "killed_mutant_ids": []}
 
-        # 2) A mutant is killed iff the same test FAILS on it.
-        killed: List[str] = []
-        for m in mutants:
-            if not _pytest_passes(workdir, m["src"], test_src, fn):
-                killed.append(m["id"])
+    # 2) A mutant is killed iff the same test FAILS on it. Each mutant runs in
+    #    its own tempdir so parallel workers don't clobber each other's impl.py.
+    workers = min(MUTANT_WORKERS, len(mutants))
+    survived: Dict[str, bool] = {}
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futures = {ex.submit(_check_mutant, m, test_src, fn): m["id"] for m in mutants}
+        for fut in as_completed(futures):
+            survived[futures[fut]] = fut.result()
 
+    killed = [m["id"] for m in mutants if not survived[m["id"]]]
     return {"reference_passed": True, "killed_mutant_ids": killed}
