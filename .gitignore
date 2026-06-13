@@ -222,4 +222,5 @@ run.jsonl
 repair_run.jsonl
 repair_baseline.json
 repair_curve.png
+orchestrate_run.jsonl
 .claude/

@@ -178,32 +178,31 @@ def _oneshot_baseline(buggy_src: str, oracle_src: str, planted_bugs: List[Dict[s
     return {"bugs_fixed": fixed_count, "total_bugs": len(planted_bugs), "cumulative_tokens": tokens}
 
 
-def main() -> None:
-    code = BUGGY_SRC;
+def run_repair(code: str, oracle_src: str, planted_bugs: List[Dict[str, Any]], start_tokens: int = 0, verbose: bool = True) -> Dict[str, Any]:
     buggy_src = code;
-    oracle_src = REFERENCE_SRC;
-    seed_bugs = [{"id": bug["id"], "description": bug["description"], "target_name": bug["target_name"]} for bug in PLANTED_BUGS];
-    stub_tests = {bug["id"]: bug["stub_test_src"] for bug in PLANTED_BUGS};
-    stub_fixes = {bug["id"]: bug["stub_fixed_src"] for bug in PLANTED_BUGS};
+    seed_bugs = [{"id": bug["id"], "description": bug["description"], "target_name": bug["target_name"]} for bug in planted_bugs];
+    stub_tests = {bug["id"]: bug["stub_test_src"] for bug in planted_bugs};
+    stub_fixes = {bug["id"]: bug["stub_fixed_src"] for bug in planted_bugs};
 
-    logger = JsonlLogger(LOG_PATH);
-    baseline = _oneshot_baseline(buggy_src, oracle_src, PLANTED_BUGS);
-    with open(BASELINE_PATH, "w") as handle:
-        json.dump(baseline, handle);
-    print("one-shot baseline: fixed {}/{} bugs, tokens {}".format(baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
+    baseline = _oneshot_baseline(buggy_src, oracle_src, planted_bugs);
+    if verbose:
+        print("one-shot baseline: fixed {}/{} bugs, tokens {}".format(baseline["bugs_fixed"], baseline["total_bugs"], baseline["cumulative_tokens"]));
 
     suite_sources = [];
     bugs_fixed = [];
     failed_attempts = [];
-    cumulative_tokens = baseline["cumulative_tokens"];
+    entries = [];
+    cumulative_tokens = start_tokens + baseline["cumulative_tokens"];
 
-    print("iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round");
+    if verbose:
+        print("iteration  cumulative_tokens  bugs_fixed  kill_rate  fixed_this_round");
     for iteration in range(1, MAX_ITERATIONS + 1):
         observation = _build_observation(code, bugs_fixed, failed_attempts, seed_bugs, cumulative_tokens);
         decision = find_bug(observation);
         cumulative_tokens += _token_count(decision["tokens"]);
         if not decision["should_continue"] or not decision["has_bug"]:
-            print("no further bugs reported at iteration {}".format(iteration));
+            if verbose:
+                print("no further bugs reported at iteration {}".format(iteration));
             break
 
         bug = decision["bug"];
@@ -217,7 +216,8 @@ def main() -> None:
 
         if not _verify_fix(test_src, fixed_src, code, bug["id"], bug["description"]):
             failed_attempts.append({"id": bug["id"], "description": bug["description"]});
-            print("{:>9}  {:>17}  {:>10}  {:>9}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), "-", "rejected:" + bug["id"]));
+            if verbose:
+                print("{:>9}  {:>17}  {:>10}  {:>9}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), "-", "rejected:" + bug["id"]));
             continue
 
         code = fixed_src;
@@ -235,11 +235,35 @@ def main() -> None:
             "kill_rate": kill_rate,
             "fixed_this_round": bug["id"],
         };
-        logger.append(entry);
-        print("{:>9}  {:>17}  {:>10}  {:>9.3f}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), kill_rate, bug["id"]));
+        entries.append(entry);
+        if verbose:
+            print("{:>9}  {:>17}  {:>10}  {:>9.3f}  {}".format(iteration, cumulative_tokens, len(bugs_fixed), kill_rate, bug["id"]));
 
-    graded = _grade(code, buggy_src, PLANTED_BUGS);
-    print("loop fixed {}/{} planted bugs (graded), {} tests in suite, log at {}".format(graded, len(PLANTED_BUGS), len(suite_sources), LOG_PATH));
+    graded = _grade(code, buggy_src, planted_bugs);
+    if verbose:
+        print("loop fixed {}/{} planted bugs (graded), {} tests in suite".format(graded, len(planted_bugs), len(suite_sources)));
+    return {
+        "buggy_src": buggy_src,
+        "final_code": code,
+        "suite_sources": suite_sources,
+        "bugs_fixed": bugs_fixed,
+        "failed_attempts": failed_attempts,
+        "cumulative_tokens": cumulative_tokens,
+        "baseline": baseline,
+        "entries": entries,
+        "graded": graded,
+        "total_bugs": len(planted_bugs),
+    }
+
+
+def main() -> None:
+    result = run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS);
+    logger = JsonlLogger(LOG_PATH);
+    with open(BASELINE_PATH, "w") as handle:
+        json.dump(result["baseline"], handle);
+    for entry in result["entries"]:
+        logger.append(entry);
+    print("log at {}".format(LOG_PATH));
 
 
 if __name__ == "__main__":
