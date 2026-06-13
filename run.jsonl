@@ -1,3 +1,0 @@
-{"iteration": 1, "cumulative_tokens": 2220, "bugs_fixed": 1, "kill_rate": 0.3333333333333333, "fixed_this_round": "B1_clamp_upper"}
-{"iteration": 2, "cumulative_tokens": 4136, "bugs_fixed": 2, "kill_rate": 0.3333333333333333, "fixed_this_round": "B2_mean_empty"}
-{"iteration": 3, "cumulative_tokens": 6094, "bugs_fixed": 3, "kill_rate": 0.3333333333333333, "fixed_this_round": "B3_running_max_min"}
