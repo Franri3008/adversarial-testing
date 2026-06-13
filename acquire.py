@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -66,11 +67,34 @@ def fetch_file(repo_url: str, path: str) -> str:
         text=True,
         timeout=60,
     )
-    if proc.returncode != 0:
-        raise RuntimeError(f"gh api failed for {repo}/{path}: {proc.stderr.strip()[:200]}")
-    import base64
+    if proc.returncode == 0:
+        import base64
 
-    return base64.b64decode(proc.stdout.strip()).decode("utf-8")
+        return base64.b64decode(proc.stdout.strip()).decode("utf-8")
+
+    # `gh api` failed — most often because no GitHub token is configured.
+    # Fall back to a shallow, unauthenticated clone (works for public repos).
+    print(f"[acquire] gh api failed ({proc.stderr.strip()[:120]}); falling back to git clone")
+    return _fetch_file_via_clone(repo, path)
+
+
+def _fetch_file_via_clone(repo: str, path: str) -> str:
+    clone_url = f"https://github.com/{repo}.git"
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = subprocess.run(
+            ["git", "clone", "--depth", "1", "--filter=blob:none", clone_url, tmp],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(
+                f"git clone failed for {repo}: {proc.stderr.strip()[:200]}"
+            )
+        f = Path(tmp) / path
+        if not f.exists():
+            raise RuntimeError(f"'{path}' not found in cloned repo {repo}")
+        return f.read_text()
 
 
 _MUTANT_PROMPT = """\
