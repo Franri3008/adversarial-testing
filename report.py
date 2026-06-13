@@ -217,6 +217,10 @@ def _markdown(meta: Dict[str, Any], entries: List[Dict[str, Any]], baseline: Opt
     lines.append("- **Baseline (one cold-start test):** {:.0%} kill rate".format(base_kr));
     lines.append("- **Final (hardened suite):** {:.0%} kill rate over {} mutants".format(final, total_mutants));
     lines.append("- **Gain from looping:** +{:.0%}".format(max(0.0, final - base_kr)));
+    if meta.get("mutant_rounds"):
+        lines.append("- **Co-evolution:** {} adversary round(s); {} distinct bugs caught across waves".format(
+            meta.get("mutant_rounds"), meta.get("killed_total", "?")));
+        lines.append("  (the adversary kept inventing bugs the suite missed; each wave is a dip-then-recover in the graph above)");
     lines.append("- **Stop reason:** `{}`".format(stop_reason));
     last_metric = metrics[-1] if metrics else (entries[-1] if entries else {});
     if last_metric:
@@ -376,6 +380,8 @@ def write_repo_report(repo: str, results: List[Dict[str, Any]], out_dir: str = "
             "bulk_model": res.get("bulk_model", "-"),
             "total_mutants": res.get("total", 0),
             "surviving": res.get("surviving", []),
+            "mutant_rounds": res.get("mutant_rounds", 0),
+            "killed_total": res.get("killed_total", 0),
         };
         write_report(meta, res["entries"], res["suite_sources"], baseline=res.get("baseline"), out_dir=os.path.join(out_dir, slug));
         entries = res["entries"];
