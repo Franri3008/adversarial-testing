@@ -14,7 +14,8 @@ The Python interpreter decides — no LLM judges the result.
 > suite against planted mutants. A second **find-and-fix loop** (`repair_main.py`) reuses
 > the same runner/LLM contracts to *repair real bugs* — find a defect, write a failing
 > test, fix the code, then mutation-test the new test to prove it bites. See
-> [Find-and-fix mode](#find-and-fix-mode-repair_mainpy).
+> [Find-and-fix mode](#find-and-fix-mode-repair_mainpy). To run both as one pipeline
+> (repair → harden) on a single target, use [`orchestrate.py`](#orchestrated-run-orchestratepy).
 
 ## How it works
 
@@ -169,6 +170,42 @@ quality). Progress is appended to `repair_run.jsonl`, with the one-shot baseline
 > stale-`.pyc` issue in the shared runner's reused temp dir (it rewrites `impl.py` per
 > mutant, so `import impl` can load cached bytecode and report wrong kills on multi-mutant
 > calls). The real fix belongs in `runner.py`; this avoids touching that frozen file.
+
+## Orchestrated run (`orchestrate.py`)
+
+A thin orchestrator runs both loops as two **phases on one target** with a single token
+budget and a combined report — repair the code, then harden the resulting suite to plateau:
+
+```
+Phase 1 · REPAIR  → run the find-and-fix loop until no bug remains (fixes code + seeds suite)
+Phase 2 · HARDEN  → mutate the corrected code, keep generating tests (escalating bulk→strategy)
+                    until full-kill, kill-rate plateau, or budget cap
+→ "repaired N/total bugs, final suite kill-rate X%, total tokens T"
+```
+
+```bash
+python orchestrate.py
+```
+
+Deterministic offline run (stub backend):
+
+```
+$ LOOPIFY_BACKEND=sdk python orchestrate.py
+=== PHASE 1: REPAIR (find & fix real bugs) ===
+...
+loop fixed 3/3 planted bugs (graded), 3 tests in suite
+=== PHASE 2: HARDEN (mutation-test the repaired code to plateau) ===
+harden          1               4336  bulk          1.000  0
+=== ORCHESTRATION COMPLETE ===
+repaired 3/3 planted bugs
+final suite kill-rate 1.000 (3 tests, stop: full-kill)
+total tokens 4336 (repair 4336 + harden 0)
+```
+
+`main.py` and `repair_main.py` stay usable standalone — the orchestrator just composes
+them via the shared contracts (it imports `run_repair` and reuses `generate_test` /
+`run_and_check`). Config: `ORCH_HARDEN_ITERS` (Phase 2 iteration cap, default 12) and
+`ORCH_TOKEN_CAP` (total-token budget across both phases, `0` disables).
 
 ## Roadmap
 
