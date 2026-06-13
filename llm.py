@@ -140,10 +140,36 @@ def _complete_strategy(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[
     # Claude models reject a non-default temperature, so we leave decoding to the API default.
     params = {k: v for k, v in kwargs.items() if k not in CLAUDE_UNSUPPORTED_KWARGS};
     max_tokens = params.pop("max_tokens", DEFAULT_MAX_TOKENS);
-    response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": prompt}], **params);
+    # Prompt caching: callers can pass a `cache_prefix` (stable text — system
+    # instructions, reference src, etc) that we send as its own content block with
+    # cache_control. Subsequent calls within ~5min that share the same prefix get
+    # a cache hit, slashing input cost (~10%) and latency. The variable `prompt`
+    # follows in a normal block.
+    cache_prefix = params.pop("cache_prefix", None);
+    if cache_prefix:
+        content = [
+            {"type": "text", "text": cache_prefix, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": prompt},
+        ];
+    else:
+        content = prompt;
+    response = client.messages.create(model=model, max_tokens=max_tokens, messages=[{"role": "user", "content": content}], **params);
     text = "".join(getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text");
-    tokens = {"in": int(response.usage.input_tokens), "out": int(response.usage.output_tokens)};
-    return {"text": text, "model": model, "tokens": tokens, "cost": _cost(tokens, STRATEGY_RATE_PER_MTOK)}
+    usage = response.usage;
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0);
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0);
+    fresh_in = int(usage.input_tokens);
+    # Total input for budget accounting includes cached reads/writes (API reports
+    # them separately). Cost reflects the actual billed mix: writes ~1.25x, reads ~0.1x.
+    tokens = {"in": fresh_in + cache_read + cache_write, "out": int(usage.output_tokens)};
+    in_rate, out_rate = STRATEGY_RATE_PER_MTOK;
+    cost = (
+        fresh_in / 1e6 * in_rate
+        + cache_write / 1e6 * in_rate * 1.25
+        + cache_read / 1e6 * in_rate * 0.1
+        + tokens["out"] / 1e6 * out_rate
+    );
+    return {"text": text, "model": model, "tokens": tokens, "cost": cost}
 
 
 def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,20 +192,25 @@ def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str,
 
 def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, Any]:
     model = resolve_model(role);
+    # cache_prefix is only honored by the Anthropic SDK path. For other backends
+    # we concatenate it onto the prompt so the model still sees the same text —
+    # we just don't get the cache discount.
+    cache_prefix = kwargs.get("cache_prefix");
+    joined_prompt = (cache_prefix + "\n\n" + prompt) if cache_prefix else prompt;
     # Explicit offline backend: deterministic STUB_COMPLETION, no network. The only path
     # that is allowed to return a stub.
     if BACKEND == "stub":
-        return _stub(prompt, model)
+        return _stub(joined_prompt, model)
     # Real backends fail LOUD: an auth/rate-limit/transport error must surface, not be
     # silently swallowed into a stub that looks like a legitimate (empty) result. Use
     # BACKEND=stub if you want the offline path.
     try:
         if BACKEND == "cli":
-            return _complete_cli(prompt, role)
+            return _complete_cli(joined_prompt, role)
         if role == "bulk":
-            return _complete_bulk(prompt, model, kwargs)
+            return _complete_bulk(joined_prompt, model, {k: v for k, v in kwargs.items() if k != "cache_prefix"})
         if STRATEGY_PROVIDER == "nebius":
-            return _complete_bulk(prompt, STRATEGY_NEBIUS_MODEL, kwargs)
+            return _complete_bulk(joined_prompt, STRATEGY_NEBIUS_MODEL, {k: v for k, v in kwargs.items() if k != "cache_prefix"})
         return _complete_strategy(prompt, model, kwargs)
     except Exception as exc:
         raise RuntimeError(

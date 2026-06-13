@@ -1,84 +1,85 @@
 import { parsePackageJson } from "./impl";
 import { test, expect } from "vitest";
 
-test("parsePackageJson handles various edge cases and bugs correctly", () => {
-  const validPackageJson = JSON.stringify({
-    name: "test-package",
-    version: "1.0.0",
-    dependencies: {
-      lodash: "^4.17.21",
-      react: "18.2.0",
-    },
-    devDependencies: {
-      typescript: "^5.0.0",
-      vitest: "^1.0.0",
-    },
-  });
-
-  const inputWithValidPackageJson = [
-    { path: "package.json", content: validPackageJson },
+test("parsePackageJson handles various edge cases and bugs", () => {
+  // 1. endswith_wrong_suffix: should not match "my-package.json"
+  const inputWithWrongSuffix = [
+    { path: "my-package.json", content: '{"dependencies": {"foo": "1.0.0"}}' },
   ];
+  expect(() => parsePackageJson(inputWithWrongSuffix)).toThrow("no package.json found in input files");
 
-  // Correct behavior: returns parsed dependencies and devDependencies
-  const result = parsePackageJson(inputWithValidPackageJson);
-  expect(result.dependencies).toHaveLength(2);
-  expect(result.devDependencies).toHaveLength(2);
-  expect(result.dependencies[0].name).toBe("lodash");
-  expect(result.dependencies[0].version).toBe("^4.17.21");
-  expect(result.devDependencies[1].name).toBe("vitest");
-  expect(result.devDependencies[1].version).toBe("^1.0.0");
-
-  // Test for endswith_wrong_path: should fail on file named mypackage.json
-  const inputWithWrongPath = [
-    { path: "mypackage.json", content: validPackageJson },
-  ];
-  expect(() => parsePackageJson(inputWithWrongPath)).toThrow();
-
-  // Test for flipped_version_typecheck: should not include non-string versions
-  const invalidVersionJson = JSON.stringify({
-    dependencies: {
-      bad: null,
-      good: "1.0.0",
-    },
-  });
-  const inputWithInvalidVersion = [
-    { path: "package.json", content: invalidVersionJson },
-  ];
-  const resultWithInvalidVersion = parsePackageJson(inputWithInvalidVersion);
-  expect(resultWithInvalidVersion.dependencies).toHaveLength(1);
-  expect(resultWithInvalidVersion.dependencies[0].name).toBe("good");
-
-  // Test for dev_uses_dependencies: should not include devDependencies in dependencies
-  const inputWithDevInDependencies = [
-    { path: "package.json", content: JSON.stringify({
-      dependencies: { dev: "1.0.0" },
-      devDependencies: { dev: "2.0.0" },
-    }) },
-  ];
-  const resultWithDevInDependencies = parsePackageJson(inputWithDevInDependencies);
-  expect(resultWithDevInDependencies.dependencies).toHaveLength(1);
-  expect(resultWithDevInDependencies.dependencies[0].name).toBe("dev");
-  expect(resultWithDevInDependencies.dependencies[0].version).toBe("1.0.0");
-  expect(resultWithDevInDependencies.devDependencies).toHaveLength(1);
-  expect(resultWithDevInDependencies.devDependencies[0].name).toBe("dev");
-  expect(resultWithDevInDependencies.devDependencies[0].version).toBe("2.0.0");
-
-  // Test for dropped_missing_guard: should throw when package.json is missing
+  // 2. dropped_guard_no_throw: missing package.json should throw
   const inputWithoutPackageJson = [
     { path: "other.json", content: "{}" },
   ];
-  expect(() => parsePackageJson(inputWithoutPackageJson)).toThrow();
+  expect(() => parsePackageJson(inputWithoutPackageJson)).toThrow("no package.json found in input files");
 
-  // Test for swapped_return_fields: should return correct dependency fields
-  const inputWithSwappedFields = [
-    { path: "package.json", content: JSON.stringify({
-      dependencies: { a: "1.0.0" },
-      devDependencies: { b: "2.0.0" },
-    }) },
+  // 3. version_type_check_flipped: only string versions should be included
+  const inputWithMixedVersions = [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        dependencies: {
+          stringDep: "1.0.0",
+          numberDep: 2,
+          objectDep: {},
+        },
+        devDependencies: {
+          stringDev: "2.0.0",
+          boolDev: true,
+        },
+      }),
+    },
   ];
-  const resultWithSwappedFields = parsePackageJson(inputWithSwappedFields);
-  expect(resultWithSwappedFields.dependencies).toHaveLength(1);
-  expect(resultWithSwappedFields.dependencies[0].name).toBe("a");
-  expect(resultWithSwappedFields.devDependencies).toHaveLength(1);
-  expect(resultWithSwappedFields.devDependencies[0].name).toBe("b");
+  const resultMixed = parsePackageJson(inputWithMixedVersions);
+  expect(resultMixed.dependencies).toEqual([{ name: "stringDep", version: "1.0.0" }]);
+  expect(resultMixed.devDependencies).toEqual([{ name: "stringDev", version: "2.0.0" }]);
+
+  // 4. devdeps_use_dependencies: devDependencies should come from devDependencies field, not dependencies
+  const inputDevDeps = [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        dependencies: {
+          dep1: "1.0.0",
+        },
+        devDependencies: {
+          dev1: "2.0.0",
+        },
+      }),
+    },
+  ];
+  const resultDevDeps = parsePackageJson(inputDevDeps);
+  expect(resultDevDeps.dependencies).toEqual([{ name: "dep1", version: "1.0.0" }]);
+  expect(resultDevDeps.devDependencies).toEqual([{ name: "dev1", version: "2.0.0" }]);
+
+  // 5. deps_or_instead_of_and: missing dependencies should not crash, return empty array
+  const inputMissingDeps = [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        devDependencies: {
+          devOnly: "1.0.0",
+        },
+      }),
+    },
+  ];
+  const resultMissingDeps = parsePackageJson(inputMissingDeps);
+  expect(resultMissingDeps.dependencies).toEqual([]);
+  expect(resultMissingDeps.devDependencies).toEqual([{ name: "devOnly", version: "1.0.0" }]);
+
+  // Also test missing devDependencies
+  const inputMissingDevDeps = [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        dependencies: {
+          depOnly: "1.0.0",
+        },
+      }),
+    },
+  ];
+  const resultMissingDevDeps = parsePackageJson(inputMissingDevDeps);
+  expect(resultMissingDevDeps.dependencies).toEqual([{ name: "depOnly", version: "1.0.0" }]);
+  expect(resultMissingDevDeps.devDependencies).toEqual([]);
 });
