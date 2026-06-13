@@ -1,0 +1,4 @@
+{"iteration": 1, "cumulative_tokens": 1249, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0002}
+{"iteration": 2, "cumulative_tokens": 2568, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0005}
+{"iteration": 3, "cumulative_tokens": 4384, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0009}
+{"iteration": 4, "cumulative_tokens": 5693, "kill_rate": 0.0, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.0012}

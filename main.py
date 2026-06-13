@@ -70,9 +70,9 @@ def _get_runner(language: str, runner: Optional[str] = None):
     return run_and_check
 
 
-def main() -> None:
-    kwargs = _parse_kwargs(sys.argv[1:])
-    reference_src, mutants, language, function_name, runner, test_import_path = resolve_target(kwargs)
+def harden_target(reference_src, mutants, language, function_name, test_import_path=None,
+                  runner=None, log_path=LOG_PATH, label=""):
+    """Run the two-tier harden loop on one target. Returns everything the report needs."""
     run_and_check = _get_runner(language, runner)
 
     # Bind language/function so generation works for both fixture and CLI targets.
@@ -86,19 +86,19 @@ def main() -> None:
             test_import_path=test_import_path,
         )
 
-    logger = JsonlLogger(LOG_PATH)
+    logger = JsonlLogger(log_path)
     total = len(mutants)
     target = {
-        "repo": kwargs.get("repo", "(built-in fixture)"),
-        "file": kwargs.get("file", "-"),
-        "function": function_name or kwargs.get("function", "-"),
+        "function": function_name or "-",
         "language": language,
+        "label": label,
     }
     logger.append(run_started(logger.run_id, "harden", target, reference_src=reference_src))
     logger.append(mutants_generated(logger.run_id, "harden", mutants))
 
     baseline = run_baseline(reference_src, mutants, gen_fn, run_and_check)
-    print("baseline kill_rate={:.3f} tokens={}".format(baseline["kill_rate"], baseline["cumulative_tokens"]))
+    head = "[{}] ".format(label) if label else ""
+    print("{}baseline kill_rate={:.3f} tokens={}".format(head, baseline["kill_rate"], baseline["cumulative_tokens"]))
 
     surviving = list(mutants)
     killed_total = set()
@@ -197,19 +197,73 @@ def main() -> None:
         killed_mutant_ids=sorted(killed_total),
         surviving_mutants=mutant_records(surviving, status="surviving"),
     ))
-    print("final kill_rate={:.3f} over {} mutants, cost=${:.4f}, log at {}".format(
-        final, total, cumulative_cost, LOG_PATH))
+    print("{}final kill_rate={:.3f} over {} mutants, cost=${:.4f}".format(
+        head, final, total, cumulative_cost))
+    return {
+        "entries": logger.entries,
+        "suite_sources": suite_sources,
+        "baseline": baseline,
+        "surviving": surviving,
+        "final": final,
+        "total": total,
+        "language": language,
+        "function_name": function_name,
+        "strategy_model": strategy_model or "-",
+        "bulk_model": bulk_model or "-",
+        "stop_reason": stop_reason,
+    }
+
+
+def _run_repo_scan(kwargs: Dict[str, str]) -> None:
+    """repo= given without function= -> discover every self-contained function and harden each."""
+    import discover
+    import report
+
+    n = int(kwargs.get("mutants", "5"))
+    max_targets = int(kwargs.get("max_targets", "0"))
+    targets = discover.discover_targets(
+        kwargs["repo"], mutants_per=n, max_targets=max_targets, only_file=kwargs.get("file"))
+    if not targets:
+        raise SystemExit("no eligible self-contained functions found in {}".format(kwargs["repo"]))
+
+    results = []
+    for index, (rel, t) in enumerate(targets, start=1):
+        label = "{}/{} {}::{}".format(index, len(targets), rel, t.function_name)
+        print("\n=== TARGET {} ===".format(label))
+        res = harden_target(
+            t.reference_src, t.mutants, t.language, t.function_name,
+            log_path="run_{:02d}.jsonl".format(index), label="{}::{}".format(rel, t.function_name))
+        res["file"] = rel
+        results.append(res)
+
+    report_path = report.write_repo_report(kwargs["repo"], results)
+    print("\nrepo report at {}".format(report_path))
+
+
+def main() -> None:
+    kwargs = _parse_kwargs(sys.argv[1:])
+
+    # repo without an explicit function -> scan the whole repo for targets.
+    if kwargs.get("repo") and not kwargs.get("function"):
+        _run_repo_scan(kwargs)
+        return
+
+    reference_src, mutants, language, function_name, runner, test_import_path = resolve_target(kwargs)
+    res = harden_target(reference_src, mutants, language, function_name, test_import_path, runner)
 
     import report
     meta = {
-        **target,
-        "strategy_model": strategy_model or "-",
-        "bulk_model": bulk_model or "-",
-        "total_mutants": total,
-        "surviving": surviving,
-        "stop_reason": stop_reason,
+        "repo": kwargs.get("repo", "(built-in fixture)"),
+        "file": kwargs.get("file", "-"),
+        "function": function_name or kwargs.get("function", "-"),
+        "language": language,
+        "strategy_model": res["strategy_model"],
+        "bulk_model": res["bulk_model"],
+        "total_mutants": res["total"],
+        "surviving": res["surviving"],
+        "stop_reason": res["stop_reason"],
     }
-    report_path = report.write_report(meta, logger.entries, suite_sources, baseline=baseline)
+    report_path = report.write_report(meta, res["entries"], res["suite_sources"], baseline=res["baseline"])
     print("report at {}".format(report_path))
 
 
