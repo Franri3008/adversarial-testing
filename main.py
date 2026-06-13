@@ -90,10 +90,14 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
                   runner=None, log_path=LOG_PATH, label="", context=None):
     """Run the two-tier harden loop on one target. Returns everything the report needs."""
     base_run_and_check = _get_runner(language, runner)
-    # Package-context targets (not self-contained) carry an import context; bind it so
-    # every run/compile in this loop rebuilds the package sandbox. Standalone targets
-    # (context is None) keep the plain (test, ref, mutants) signature untouched.
-    run_and_check = functools.partial(base_run_and_check, context=context) if context else base_run_and_check
+    # Bind the real target name so the runner names its pytest fixture correctly — without
+    # it the runner falls back to the first def in the file, so any target that isn't first
+    # makes every generated test error ("fixture not found") -> reference fails -> 0 kills.
+    # Package-context targets also carry an import context so each run rebuilds the sandbox.
+    _bound = {"function_name": function_name}
+    if context:
+        _bound["context"] = context
+    run_and_check = functools.partial(base_run_and_check, **_bound)
 
     # Bind language/function so generation works for both fixture and CLI targets.
     def gen_fn(ref, surviving, role="bulk"):

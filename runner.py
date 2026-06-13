@@ -139,12 +139,19 @@ def _check_mutant(mutant: Dict[str, Any], test_src: str, fn: str, context: Optio
 
 
 def run_and_check(
-    test_src: str, reference_src: str, mutants: List[Dict[str, Any]], context: Optional[dict] = None
+    test_src: str,
+    reference_src: str,
+    mutants: List[Dict[str, Any]],
+    context: Optional[dict] = None,
+    function_name: Optional[str] = None,
 ) -> Dict[str, Any]:
     if not mutants:
         return {"reference_passed": True, "killed_mutant_ids": []}
 
-    fn = _function_name(reference_src)
+    # Name the pytest fixture after the ACTUAL function under test (the same name the
+    # generator gave the test). Fall back to the first top-level def only when no name is
+    # passed — correct only when the target IS the first def in the file.
+    fn = function_name or _function_name(reference_src)
 
     # 1) The test must PASS on the correct reference, else it's a bad test and
     #    we trust none of its kills.
