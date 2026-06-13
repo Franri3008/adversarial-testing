@@ -1,3 +1,4 @@
+import functools
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -86,9 +87,13 @@ def _get_runner(language: str, runner: Optional[str] = None):
 
 
 def harden_target(reference_src, mutants, language, function_name, test_import_path=None,
-                  runner=None, log_path=LOG_PATH, label=""):
+                  runner=None, log_path=LOG_PATH, label="", context=None):
     """Run the two-tier harden loop on one target. Returns everything the report needs."""
-    run_and_check = _get_runner(language, runner)
+    base_run_and_check = _get_runner(language, runner)
+    # Package-context targets (not self-contained) carry an import context; bind it so
+    # every run/compile in this loop rebuilds the package sandbox. Standalone targets
+    # (context is None) keep the plain (test, ref, mutants) signature untouched.
+    run_and_check = functools.partial(base_run_and_check, context=context) if context else base_run_and_check
 
     # Bind language/function so generation works for both fixture and CLI targets.
     def gen_fn(ref, surviving, role="bulk"):
@@ -197,7 +202,8 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
             print("--- wave {} cleared ({} mutants killed) -> adversary searching for new bugs ---".format(mutant_round, total))
             adv = adversary.generate_surviving_mutants(
                 reference_src, function_name, language, suite_sources, run_and_check,
-                n=MUTANTS_PER_ROUND, existing_ids=existing_ids, round_idx=mutant_round, role="strategy")
+                n=MUTANTS_PER_ROUND, existing_ids=existing_ids, round_idx=mutant_round, role="strategy",
+                context=context)
             cumulative_tokens += adv["tokens"]
             cumulative_cost += adv.get("cost", 0.0)
             strategy_model = adv.get("model", strategy_model) or strategy_model
@@ -274,7 +280,10 @@ def _run_repo_scan(kwargs: Dict[str, str]) -> None:
     targets = discover.discover_targets(
         kwargs["repo"], mutants_per=n, max_targets=max_targets, only_file=kwargs.get("file"))
     if not targets:
-        raise SystemExit("no eligible self-contained functions found in {}".format(kwargs["repo"]))
+        raise SystemExit(
+            "no targets with valid mutants in {} — see the discover log above: an empty "
+            "list means either no function passed the import/eligibility gate, or mutant "
+            "generation failed for every candidate attempted (the ✗ lines).".format(kwargs["repo"]))
 
     indexed = list(enumerate(targets, start=1))
     workers = min(TARGET_WORKERS, len(indexed))
@@ -285,7 +294,7 @@ def _run_repo_scan(kwargs: Dict[str, str]) -> None:
         res = harden_target(
             t.reference_src, t.mutants, t.language, t.function_name,
             log_path="run_{:02d}.jsonl".format(index),
-            label="{}::{}".format(rel, t.function_name))
+            label="{}::{}".format(rel, t.function_name), context=t.context)
         res["file"] = rel
         return index, res
 

@@ -30,6 +30,10 @@ class Target:
     mutants: List[Dict[str, Any]]
     language: str
     function_name: str
+    # Package import context for functions that are NOT self-contained (they rely on
+    # sibling/relative imports). None means standalone single-file mode. See
+    # discover._package_context / runner._build_sandbox.
+    context: Optional[dict] = None
 
 
 def _parse_repo(url: str) -> str:
@@ -121,37 +125,56 @@ Return ONLY a JSON array, no prose. Keep each description to one line:
 
 
 def _extract_json_array(text: str) -> List[dict]:
+    """Pull the list of mutant objects out of a model response, defensively.
+
+    Models don't always return a clean `[{...}]`: they prepend a stray array (e.g. a
+    list of indices `[0, 1, 2, 3, 4]` — which trips json.loads with "Extra data"),
+    wrap it in prose/markdown, or truncate mid-array at the output cap. So we don't
+    trust the array framing at all — we scan for every decodable top-level JSON object
+    and keep the mutant-shaped ones (those carrying a "src"). That tolerates leading
+    junk, trailing prose, and truncation (we keep whatever objects completed).
+    """
+    # Fast path: a clean array whose elements are objects.
     m = re.search(r"\[.*\]", text, re.DOTALL)
-    if not m:
-        raise ValueError(f"no JSON array in mutant output: {text[:200]!r}")
-    blob = m.group(0)
-    try:
-        return json.loads(blob)
-    except json.JSONDecodeError:
-        # The response was likely truncated (output token cap) mid-string, so the
-        # greedy regex closed on a stray ']' inside the source. Salvage every
-        # complete object we can with a streaming decoder instead of crashing.
-        salvaged = _salvage_objects(blob)
-        if not salvaged:
-            raise
-        print(f"[acquire] recovered {len(salvaged)} mutant(s) from a truncated response")
-        return salvaged
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            if isinstance(data, list):
+                objs = [x for x in data if isinstance(x, dict)]
+                if objs:
+                    return objs
+        except json.JSONDecodeError:
+            pass
+    # Robust path: scan every standalone JSON object in the text.
+    objs = _scan_objects(text)
+    mutantish = [o for o in objs if "src" in o]
+    chosen = mutantish or objs
+    if not chosen:
+        raise ValueError(f"no JSON objects in mutant output: {text[:200]!r}")
+    if not (m and len(chosen) >= 1 and m.group(0).strip().startswith("[{")):
+        print(f"[acquire] recovered {len(chosen)} mutant object(s) from a non-clean response")
+    return chosen
 
 
-def _salvage_objects(blob: str) -> List[dict]:
-    """Decode as many leading top-level JSON objects from an array as possible."""
+def _scan_objects(text: str) -> List[dict]:
+    """Decode every top-level JSON object in `text`, skipping non-object noise.
+
+    Unlike a one-shot json.loads, this advances past a `{` that doesn't begin a valid
+    object (e.g. a brace inside prose) and past a leading non-object array, and stops
+    cleanly at a truncated tail instead of discarding everything before it.
+    """
     decoder = json.JSONDecoder()
     objs: List[dict] = []
-    i = blob.find("{")
+    i = text.find("{")
     while i != -1:
         try:
-            obj, end = decoder.raw_decode(blob, i)
+            obj, end = decoder.raw_decode(text, i)
         except json.JSONDecodeError:
-            break  # hit the truncated tail
+            i = text.find("{", i + 1)  # this brace wasn't an object start; try the next
+            continue
         if isinstance(obj, dict):
             objs.append(obj)
-        # advance to the next '{' after this object
-        i = blob.find("{", end)
+        i = text.find("{", max(end, i + 1))
     return objs
 
 
@@ -164,7 +187,7 @@ def _compiles_fn(language: str):
 
 
 def generate_mutants(
-    reference_src: str, function_name: str, language: str, n: int
+    reference_src: str, function_name: str, language: str, n: int, context: Optional[dict] = None
 ) -> List[Dict[str, Any]]:
     prompt = _MUTANT_PROMPT.format(language=language, fn=function_name, n=n, ref=reference_src)
     # Each mutant is a full copy of the source; with JSON-escaping (newlines -> \n)
@@ -175,6 +198,7 @@ def generate_mutants(
     candidates = _extract_json_array(response["text"])
 
     compiles = _compiles_fn(language)
+    ctx_kw = {"context": context} if context else {}
     ref_norm = reference_src.strip()
     seen_src: set[str] = set()
     valid: List[Dict[str, Any]] = []
@@ -182,7 +206,7 @@ def generate_mutants(
         src = (c.get("src") or "").strip()
         if not src or src == ref_norm or src in seen_src:
             continue  # empty, no-op, or duplicate
-        if not compiles(src, function_name):
+        if not compiles(src, function_name, **ctx_kw):
             print(f"[acquire] dropping mutant {c.get('id', i)} (does not compile)")
             continue
         seen_src.add(src)
