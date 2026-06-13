@@ -47,7 +47,8 @@ def suite_misses(suite_sources, reference_src, mutant, run_and_check) -> bool:
 
 
 def generate_surviving_mutants(reference_src, function_name, language, suite_sources,
-                               run_and_check, n=5, existing_ids=None, round_idx=1, role="strategy"):
+                               run_and_check, n=5, existing_ids=None, round_idx=1, role="strategy",
+                               context=None):
     """Ask the adversary for n bugs the current suite misses; return only the validated survivors."""
     existing_ids = existing_ids if existing_ids is not None else set();
     suite_text = "\n\n".join("# test {}\n{}".format(i + 1, t) for i, t in enumerate(suite_sources)) or "(no tests yet)";
@@ -60,13 +61,14 @@ def generate_surviving_mutants(reference_src, function_name, language, suite_sou
         candidates = [];
 
     compiles = acquire._compiles_fn(language);
+    ctx_kw = {"context": context} if context else {};
     ref_norm = reference_src.strip();
     survivors = [];
     for i, c in enumerate(candidates):
         src = (c.get("src") or "").strip();
         if not src or src == ref_norm:
             continue
-        if not compiles(src, function_name):
+        if not compiles(src, function_name, **ctx_kw):
             continue
         mid = "r{}_{}".format(round_idx, c.get("id") or "mut_{}".format(i));
         if mid in existing_ids:

@@ -5,8 +5,8 @@
 | | |
 |---|---|
 | repo | `fiberplane/honcpiler` |
-| file | `src/parse-packages.ts` |
-| function | `parsePackageJson` |
+| file | `src/vfs/utils/semver-compare.ts` |
+| function | `compareVersions` |
 | language | typescript |
 | strategy model | `claude-opus-4-8` |
 | bulk model | `nvidia/Nemotron-3-Ultra-550b-a55b` |
@@ -15,13 +15,13 @@
 
 ![convergence](convergence.png)
 
-- **Baseline (one cold-start test):** 80% kill rate
-- **Final (hardened suite):** 88% kill rate over 8 mutants
-- **Gain from looping:** +7%
-- **Co-evolution:** 1 adversary round(s); 7 distinct bugs caught across waves
+- **Baseline (one cold-start test):** 0% kill rate
+- **Final (hardened suite):** 60% kill rate over 10 mutants
+- **Gain from looping:** +60%
+- **Co-evolution:** 1 adversary round(s); 6 distinct bugs caught across waves
   (the adversary kept inventing bugs the suite missed; each wave is a dip-then-recover in the graph above)
 - **Stop reason:** `-`
-- **Tokens spent:** 44,672
+- **Tokens spent:** 41,129
 
 ## Run status
 
@@ -32,99 +32,259 @@
 
 | iter | tier | cum. tokens | kill rate | killed this round |
 |---|---|---|---|---|
-| 1 | - | 2,150 | 80% | endswith_wrong_suffix, dropped_guard_no_throw, version_type_check_flipped, devdeps_use_dependencies |
-| 2 | - | 5,411 | 100% | deps_or_instead_of_and |
-| 3 | - | 18,387 | 62% | — |
-| 4 | - | 23,149 | 62% | — |
-| 5 | - | 27,911 | 62% | — |
-| 6 | - | 32,673 | 62% | — |
-| 7 | - | 34,671 | 62% | — |
-| 8 | - | 36,520 | 75% | r1_empty_string_version_excluded |
-| 9 | - | 38,821 | 88% | r1_find_last_package_json |
-| 10 | - | 40,641 | 88% | — |
-| 11 | - | 42,470 | 88% | — |
-| 12 | - | 44,672 | 88% | — |
+| 1 | - | 4,880 | 0% | — |
+| 2 | - | 8,809 | 100% | flipped_gt_comparison, off_by_one_loop, prerelease_swapped, wrong_regex_group, min_instead_of_max |
+| 3 | - | 18,835 | 50% | — |
+| 4 | - | 23,773 | 50% | — |
+| 5 | - | 28,711 | 50% | — |
+| 6 | - | 33,649 | 50% | — |
+| 7 | - | 35,586 | 60% | r1_regex_no_anchor |
+| 8 | - | 37,522 | 60% | — |
+| 9 | - | 39,361 | 60% | — |
+| 10 | - | 41,129 | 60% | — |
 
 ## Mutants generated
 
 | id | status | description |
 |---|---|---|
-| `r1_array_typeof_object_accepts_array` | surviving | Uses Array.isArray-negation-free object check that allows dependencies as an array; arrays pass the object check and Object.entries yields indices, untested by suite. |
+| `r1_empty_array_returns_first` | surviving | getLatestVersion returns versions[0] instead of undefined for empty array (untested branch) |
+| `r1_prerelease_only_v1_check` | surviving | uses startsWith('-') instead of includes('-') so embedded prerelease markers like 1.0.0-alpha still work but a leading-dash edge differs |
+| `r1_radix_dropped` | surviving | parseInt called without radix 10, so leading-zero parts could parse differently for octal-like inputs not in tests |
+| `r1_zero_part_coalesce` | surviving | uses ?? 0 instead of \|\| 0 for v1Part default; NaN from malformed parts no longer coerced to 0 |
 
 <details>
-<summary>r1_array_typeof_object_accepts_array source</summary>
+<summary>r1_empty_array_returns_first source</summary>
 
 ```ts
-import type { InputFiles } from "./typescript-compile";
+/**
+ * Returns the latest (highest) version from a list of semver version strings
+ */
+export function getLatestVersion(versions: string[]): string | undefined {
+  if (versions.length < 0) {
+    return undefined;
+  }
 
-export type PackageDependency = {
-  name: string;
-  version: string;
-};
-
-export type ParsedDependencies = {
-  dependencies: PackageDependency[];
-  devDependencies: PackageDependency[];
-};
+  return versions.reduce((latest, current) => {
+    return compareVersions(current, latest) > 0 ? current : latest;
+  }, versions[0]);
+}
 
 /**
- * Parses package.json from InputFiles array and extracts all dependencies and devDependencies
- * @param input Array of input files
- * @returns Object containing parsed dependencies and devDependencies
+ * Compares two semver version strings
  */
-export function parsePackageJson(input: InputFiles[]): ParsedDependencies {
-  // Find package.json file in the input array
-  const packageJsonFile = input.find(
-    (file) =>
-      file.path === "package.json" ||
-      file.path === "/package.json" ||
-      file.path.endsWith("/package.json"),
-  );
+export function compareVersions(version1: string, version2: string): number {
+  const v1Parts = version1.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
 
-  if (!packageJsonFile) {
-    throw new Error("no package.json found in input files");
+  const v2Parts = version2.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+    const v1Part = v1Parts[i] || 0;
+    const v2Part = v2Parts[i] || 0;
+
+    if (v1Part > v2Part) {
+      return 1;
+    }
+    if (v1Part < v2Part) {
+      return -1;
+    }
   }
 
-  try {
-    const packageJson = JSON.parse(packageJsonFile.content);
+  const v1Prerelease = version1.includes("-");
+  const v2Prerelease = version2.includes("-");
 
-    const dependencies: PackageDependency[] = [];
-    const devDependencies: PackageDependency[] = [];
-
-    // Parse dependencies
-    if (
-      packageJson.dependencies != null &&
-      typeof packageJson.dependencies === "object"
-    ) {
-      for (const [name, version] of Object.entries(packageJson.dependencies)) {
-        if (typeof version === "string") {
-          dependencies.push({ name, version });
-        }
-      }
-    }
-
-    // Parse devDependencies
-    if (
-      packageJson.devDependencies != null &&
-      typeof packageJson.devDependencies === "object"
-    ) {
-      for (const [name, version] of Object.entries(
-        packageJson.devDependencies,
-      )) {
-        if (typeof version === "string") {
-          devDependencies.push({ name, version });
-        }
-      }
-    }
-
-    return {
-      dependencies,
-      devDependencies,
-    };
-  } catch (error) {
-    console.error("[parsePackageJson] Failed to parse package.json:", error);
-    throw error;
+  if (!v1Prerelease && v2Prerelease) {
+    return 1;
   }
+  if (v1Prerelease && !v2Prerelease) {
+    return -1;
+  }
+
+  return 0;
+}
+```
+
+</details>
+
+<details>
+<summary>r1_prerelease_only_v1_check source</summary>
+
+```ts
+/**
+ * Returns the latest (highest) version from a list of semver version strings
+ */
+export function getLatestVersion(versions: string[]): string | undefined {
+  if (versions.length === 0) {
+    return undefined;
+  }
+
+  return versions.reduce((latest, current) => {
+    return compareVersions(current, latest) > 0 ? current : latest;
+  }, versions[0]);
+}
+
+/**
+ * Compares two semver version strings
+ */
+export function compareVersions(version1: string, version2: string): number {
+  const v1Parts = version1.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  const v2Parts = version2.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+    const v1Part = v1Parts[i] || 0;
+    const v2Part = v2Parts[i] || 0;
+
+    if (v1Part > v2Part) {
+      return 1;
+    }
+    if (v1Part < v2Part) {
+      return -1;
+    }
+  }
+
+  const v1Prerelease = version1.includes("-");
+  const v2Prerelease = version2.split(".").some((p) => p.includes("-"));
+
+  if (!v1Prerelease && v2Prerelease) {
+    return 1;
+  }
+  if (v1Prerelease && !v2Prerelease) {
+    return -1;
+  }
+
+  return 0;
+}
+```
+
+</details>
+
+<details>
+<summary>r1_radix_dropped source</summary>
+
+```ts
+/**
+ * Returns the latest (highest) version from a list of semver version strings
+ * @param versions Array of semver version strings
+ * @returns The latest version string, or undefined if the array is empty
+ */
+export function getLatestVersion(versions: string[]): string | undefined {
+  if (versions.length === 0) {
+    return undefined;
+  }
+
+  return versions.reduce((latest, current) => {
+    return compareVersions(current, latest) > 0 ? current : latest;
+  }, versions[0]);
+}
+
+/**
+ * Compares two semver version strings
+ */
+export function compareVersions(version1: string, version2: string): number {
+  const v1Parts = version1.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1]) : 0;
+  });
+
+  const v2Parts = version2.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+    const v1Part = v1Parts[i] || 0;
+    const v2Part = v2Parts[i] || 0;
+
+    if (v1Part > v2Part) {
+      return 1;
+    }
+    if (v1Part < v2Part) {
+      return -1;
+    }
+  }
+
+  const v1Prerelease = version1.includes("-");
+  const v2Prerelease = version2.includes("-");
+
+  if (!v1Prerelease && v2Prerelease) {
+    return 1;
+  }
+  if (v1Prerelease && !v2Prerelease) {
+    return -1;
+  }
+
+  return 0;
+}
+```
+
+</details>
+
+<details>
+<summary>r1_zero_part_coalesce source</summary>
+
+```ts
+/**
+ * Returns the latest (highest) version from a list of semver version strings
+ */
+export function getLatestVersion(versions: string[]): string | undefined {
+  if (versions.length === 0) {
+    return undefined;
+  }
+
+  return versions.reduce((latest, current) => {
+    return compareVersions(current, latest) > 0 ? current : latest;
+  }, versions[0]);
+}
+
+/**
+ * Compares two semver version strings
+ */
+export function compareVersions(version1: string, version2: string): number {
+  const v1Parts = version1.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  const v2Parts = version2.split(".").map((part) => {
+    const match = part.match(/^(\d+)(.*)$/);
+    return match ? Number.parseInt(match[1], 10) : 0;
+  });
+
+  for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+    const v1Part = v1Parts[i] ?? 0;
+    const v2Part = v2Parts[i] || 0;
+
+    if (v1Part > v2Part) {
+      return 1;
+    }
+    if (v1Part < v2Part) {
+      return -1;
+    }
+  }
+
+  const v1Prerelease = version1.includes("-");
+  const v2Prerelease = version2.includes("-");
+
+  if (!v1Prerelease && v2Prerelease) {
+    return 1;
+  }
+  if (v1Prerelease && !v2Prerelease) {
+    return -1;
+  }
+
+  return 0;
 }
 ```
 
@@ -140,9 +300,7 @@ No rejected fixes were recorded.
 
 ## Generated adversarial tests (the changes)
 
-The loop wrote 4 test(s) into this suite:
+The loop wrote 2 test(s) into this suite:
 
 - [`adversarial_test_01.ts`](tests/adversarial_test_01.ts)
 - [`adversarial_test_02.ts`](tests/adversarial_test_02.ts)
-- [`adversarial_test_03.ts`](tests/adversarial_test_03.ts)
-- [`adversarial_test_04.ts`](tests/adversarial_test_04.ts)

@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 PYTEST_TIMEOUT = 30  # seconds per implementation
 # Auto-tune the per-mutant pytest fan-out from CPU count (mostly subprocess
@@ -48,11 +49,56 @@ def {fn}():
     return impl.{fn}
 """
 
+# Package mode: the function under test isn't self-contained — it relies on
+# sibling/relative imports — so we import it by its real dotted path out of a copy of
+# its package, instead of loading a lone impl.py. The package dir lives next to this
+# conftest; prepending its parent puts the real package name on sys.path.
+PKG_CONFTEST_TMPL = """\
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+import pytest
+from {module} import {fn} as _target
 
-def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str) -> bool:
+
+@pytest.fixture
+def {fn}():
+    return _target
+"""
+
+
+def _build_sandbox(workdir: Path, impl_src: str, fn: str, context: Optional[dict]) -> None:
+    """Lay out impl + conftest + test in workdir for one pytest run.
+
+    Standalone mode (context is None) writes the implementation as a lone `impl.py`.
+    Package mode copies the target's top-level package into the sandbox, overwrites just
+    the one file with `impl_src`, and imports the function by its real dotted path so
+    relative/sibling imports resolve. We blank every `__init__.py` in the copy so a
+    package whose __init__ pulls in third-party deps still imports — this is the "light"
+    (no dependency install) tier; a function whose own module needs uninstalled
+    third-party packages is filtered out earlier by the eligibility check.
+    """
+    if not context:
+        (workdir / "impl.py").write_text(impl_src)
+        (workdir / "conftest.py").write_text(CONFTEST_TMPL.format(fn=fn))
+        return
+    import_root = Path(context["import_root"])
+    module = context["module"]
+    target_rel = context["target_rel"]
+    top_pkg = module.split(".")[0]
+    shutil.copytree(
+        import_root / top_pkg,
+        workdir / top_pkg,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git", "tests", "test"),
+    )
+    for init in (workdir / top_pkg).rglob("__init__.py"):
+        init.write_text("")
+    (workdir / target_rel).write_text(impl_src)
+    (workdir / "conftest.py").write_text(PKG_CONFTEST_TMPL.format(module=module, fn=fn))
+
+
+def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str, context: Optional[dict] = None) -> bool:
     """Write impl + conftest + test into workdir, run pytest, return True iff it passes."""
-    (workdir / "impl.py").write_text(impl_src)
-    (workdir / "conftest.py").write_text(CONFTEST_TMPL.format(fn=fn))
+    _build_sandbox(workdir, impl_src, fn, context)
     (workdir / "test_generated.py").write_text(test_src)
     # All implementations in one run reuse this workdir's `impl.py`, so cached bytecode
     # could let a mutant import a stale (reference) `impl` and report a wrong kill.
@@ -73,25 +119,27 @@ def _pytest_passes(workdir: Path, impl_src: str, test_src: str, fn: str) -> bool
     return proc.returncode == 0
 
 
-def compiles(impl_src: str, function_name: str) -> bool:
+def compiles(impl_src: str, function_name: str, context: Optional[dict] = None) -> bool:
     """Smoke check: does this impl import and expose `function_name` as callable?
 
     Used to drop LLM-generated mutants that don't compile/import, so a broken
-    mutant never counts as a false 'kill'.
+    mutant never counts as a false 'kill'. With a package `context`, the check runs
+    in the reconstructed package — so it also doubles as the eligibility gate for
+    not-self-contained functions (same sandbox the loop will use).
     """
     smoke = f"def test_loads({function_name}):\n    assert callable({function_name})\n"
     with tempfile.TemporaryDirectory(prefix="mut-smoke-") as tmp:
-        return _pytest_passes(Path(tmp), impl_src, smoke, function_name)
+        return _pytest_passes(Path(tmp), impl_src, smoke, function_name, context)
 
 
-def _check_mutant(mutant: Dict[str, Any], test_src: str, fn: str) -> bool:
+def _check_mutant(mutant: Dict[str, Any], test_src: str, fn: str, context: Optional[dict] = None) -> bool:
     """Return True iff the test passes on this mutant (i.e. the mutant survived)."""
     with tempfile.TemporaryDirectory(prefix="mut-m-") as tmp:
-        return _pytest_passes(Path(tmp), mutant["src"], test_src, fn)
+        return _pytest_passes(Path(tmp), mutant["src"], test_src, fn, context)
 
 
 def run_and_check(
-    test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
+    test_src: str, reference_src: str, mutants: List[Dict[str, Any]], context: Optional[dict] = None
 ) -> Dict[str, Any]:
     if not mutants:
         return {"reference_passed": True, "killed_mutant_ids": []}
@@ -101,7 +149,7 @@ def run_and_check(
     # 1) The test must PASS on the correct reference, else it's a bad test and
     #    we trust none of its kills.
     with tempfile.TemporaryDirectory(prefix="mut-ref-") as tmp:
-        if not _pytest_passes(Path(tmp), reference_src, test_src, fn):
+        if not _pytest_passes(Path(tmp), reference_src, test_src, fn, context):
             return {"reference_passed": False, "killed_mutant_ids": []}
 
     # 2) A mutant is killed iff the same test FAILS on it. Each mutant runs in
@@ -109,7 +157,7 @@ def run_and_check(
     workers = min(MUTANT_WORKERS, len(mutants))
     survived: Dict[str, bool] = {}
     with ThreadPoolExecutor(max_workers=workers) as ex:
-        futures = {ex.submit(_check_mutant, m, test_src, fn): m["id"] for m in mutants}
+        futures = {ex.submit(_check_mutant, m, test_src, fn, context): m["id"] for m in mutants}
         for fut in as_completed(futures):
             survived[futures[fut]] = fut.result()
 
