@@ -1,4 +1,6 @@
+import json
 import os
+import subprocess
 import sys
 from typing import Any, Dict
 
@@ -20,6 +22,16 @@ ROUTES = {
 
 CLAUDE_UNSUPPORTED_KWARGS = ("temperature", "top_p", "top_k");
 
+# Backend transport. "cli" runs the local `claude -p` (uses the machine's Claude Code
+# auth/gateway — no SDK install, no API key needed), which is what makes this loop
+# runnable on a laptop out of the box. "sdk" uses the original anthropic/openai paths.
+BACKEND = os.environ.get("LOOPIFY_BACKEND", "cli");
+CLI_MODELS = {
+    "strategy": os.environ.get("LOOPIFY_STRATEGY_MODEL", "opus"),
+    "bulk": os.environ.get("LOOPIFY_BULK_MODEL", "haiku"),
+};
+CLI_TIMEOUT = int(os.environ.get("LOOPIFY_CLI_TIMEOUT", "180"));
+
 
 def resolve_model(role: str) -> str:
     return ROUTES.get(role, STRATEGY_MODEL)
@@ -31,7 +43,35 @@ def _warn(message: str) -> None:
 
 def _stub(prompt: str, model: str) -> Dict[str, Any]:
     tokens = {"in": max(1, len(prompt) // 4), "out": 64};
-    return {"text": "STUB_COMPLETION", "model": model, "tokens": tokens}
+    return {"text": "STUB_COMPLETION", "model": model, "tokens": tokens, "cost": 0.0}
+
+
+def _complete_cli(prompt: str, role: str) -> Dict[str, Any]:
+    """Transport via the local `claude -p`. Two-tier: strategy->opus, bulk->haiku."""
+    model = CLI_MODELS.get(role, "sonnet");
+    proc = subprocess.run(
+        ["claude", "-p", prompt, "--model", model, "--output-format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=CLI_TIMEOUT,
+    );
+    if proc.returncode != 0:
+        raise RuntimeError("claude cli exit {}: {}".format(proc.returncode, proc.stderr[:200]));
+    data = json.loads(proc.stdout);
+    if data.get("is_error"):
+        raise RuntimeError("claude cli reported error: {}".format(data.get("result"))[:200]);
+    usage = data.get("usage", {}) or {};
+    tokens = {
+        "in": int(usage.get("input_tokens", 0)),
+        "out": int(usage.get("output_tokens", 0)),
+    };
+    return {
+        "text": data.get("result", ""),
+        "model": model,
+        "tokens": tokens,
+        "cost": float(data.get("total_cost_usd", 0.0)),
+    }
+
 
 
 def _complete_strategy(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str, Any]:
@@ -67,6 +107,8 @@ def _complete_bulk(prompt: str, model: str, kwargs: Dict[str, Any]) -> Dict[str,
 def complete(prompt: str, role: str = "strategy", **kwargs: Any) -> Dict[str, Any]:
     model = resolve_model(role);
     try:
+        if BACKEND == "cli":
+            return _complete_cli(prompt, role)
         if role == "bulk":
             return _complete_bulk(prompt, model, kwargs)
         return _complete_strategy(prompt, model, kwargs)
