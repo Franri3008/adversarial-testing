@@ -42,3 +42,44 @@ def test_compiles_smoke():
     assert runner.compiles(REFERENCE, "add") is True
     assert runner.compiles("def other():\n    return 1\n", "add") is False
     assert runner.compiles("def add(a, b)\n    return a + b\n", "add") is False  # syntax error
+
+
+# Regression: a module where the target is NOT the first top-level def. The runner derives
+# the fixture name from the first def (`helper`) unless given the real name, so a test
+# asking for the target's fixture errored "fixture not found" -> reference_passed=False ->
+# 0 kills no matter how correct the test. The mutation loop hits this for any acquired/
+# discovered function that isn't first in its file (e.g. harness.is_plateau).
+MULTI_FN_REFERENCE = (
+    "def helper(x):\n"
+    "    return x + 1\n"
+    "\n"
+    "def target(n):\n"
+    "    return n * 2\n"
+)
+TARGET_TEST = (
+    "def test_target(target):\n"
+    "    assert target(3) == 6\n"
+    "    assert target(0) == 0\n"
+)
+M_TARGET_BUG = {
+    "id": "M_target_x3",
+    "description": "target multiplies by 3 instead of 2",
+    "src": "def helper(x):\n    return x + 1\n\ndef target(n):\n    return n * 3\n",
+}
+
+
+def test_function_name_targets_non_first_def():
+    # With the real target name, the reference passes and the diverging mutant is killed.
+    result = runner.run_and_check(
+        TARGET_TEST, MULTI_FN_REFERENCE, [M_TARGET_BUG], function_name="target"
+    )
+    assert result["reference_passed"] is True
+    assert result["killed_mutant_ids"] == ["M_target_x3"]
+
+
+def test_first_def_fallback_misses_non_first_target():
+    # Without the name, the runner falls back to the first def (`helper`); the test asks for
+    # a `target` fixture that does not exist -> reference fails. Documents why the mutation
+    # loop must thread the real function name through to the runner.
+    result = runner.run_and_check(TARGET_TEST, MULTI_FN_REFERENCE, [M_TARGET_BUG])
+    assert result["reference_passed"] is False

@@ -63,8 +63,10 @@ def compiles(impl_src: str, function_name: str) -> bool:
 
 
 def run_and_check(
-    test_src: str, reference_src: str, mutants: List[Dict[str, Any]]
+    test_src: str, reference_src: str, mutants: List[Dict[str, Any]], function_name=None
 ) -> Dict[str, Any]:
+    # function_name accepted for parity with the Python runner; unused (the TS test imports
+    # the function by name, so there is no fixture to name).
     if not mutants:
         return {"reference_passed": True, "killed_mutant_ids": []}
 
