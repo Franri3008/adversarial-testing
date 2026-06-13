@@ -13,3 +13,8 @@
 {"iteration": 13, "cumulative_tokens": 31201, "kill_rate": 0.8181818181818182, "killed_this_round": ["r2_swallow_parse_error_returns_empty"], "tier": "bulk", "cost_usd": 0.2851, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
 {"iteration": 14, "cumulative_tokens": 32375, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.2853, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
 {"iteration": 15, "cumulative_tokens": 33606, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.2856, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
+{"iteration": 16, "cumulative_tokens": 34816, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "bulk", "cost_usd": 0.2858, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
+{"iteration": 17, "cumulative_tokens": 36844, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "strategy", "cost_usd": 0.3155, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
+{"iteration": 18, "cumulative_tokens": 39019, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "strategy", "cost_usd": 0.3488, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
+{"iteration": 19, "cumulative_tokens": 41348, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "strategy", "cost_usd": 0.386, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
+{"iteration": 20, "cumulative_tokens": 43551, "kill_rate": 0.8181818181818182, "killed_this_round": [], "tier": "strategy", "cost_usd": 0.42, "mutant_round": 2, "total_mutants": 11, "killed_cumulative": 9}
