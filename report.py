@@ -202,6 +202,59 @@ def write_report(meta: Dict[str, Any], entries: List[Dict[str, Any]], suite_sour
     return report_path
 
 
+def _slug(*parts: str) -> str:
+    raw = "_".join(p for p in parts if p);
+    return "".join(c if c.isalnum() else "_" for c in raw).strip("_") or "target"
+
+
+def write_repo_report(repo: str, results: List[Dict[str, Any]], out_dir: str = "report") -> str:
+    """Aggregate a whole-repo scan: one index + a per-target subreport (graph + tests)."""
+    os.makedirs(out_dir, exist_ok=True);
+    rows = [];
+    total_tokens = 0;
+    for res in results:
+        slug = _slug(res.get("file", ""), res.get("function_name", ""));
+        meta = {
+            "repo": repo,
+            "file": res.get("file", "-"),
+            "function": res.get("function_name", "-"),
+            "language": res.get("language", "-"),
+            "strategy_model": res.get("strategy_model", "-"),
+            "bulk_model": res.get("bulk_model", "-"),
+            "total_mutants": res.get("total", 0),
+            "surviving": res.get("surviving", []),
+        };
+        write_report(meta, res["entries"], res["suite_sources"], baseline=res.get("baseline"), out_dir=os.path.join(out_dir, slug));
+        entries = res["entries"];
+        base_kr = res.get("baseline", {}).get("kill_rate", 0.0) if res.get("baseline") else 0.0;
+        final_kr = _final_kill_rate(entries);
+        tokens = int(entries[-1].get("cumulative_tokens", 0)) if entries else 0;
+        total_tokens += tokens;
+        rows.append((res.get("function_name", "?"), res.get("file", "-"), base_kr, final_kr, res.get("total", 0), tokens, slug));
+
+    mean_final = sum(r[3] for r in rows) / len(rows) if rows else 0.0;
+    lines = [];
+    lines.append("# Repo hardening report");
+    lines.append("");
+    lines.append("**Repo:** `{}`".format(repo));
+    lines.append("");
+    lines.append("Scanned for self-contained functions and hardened **{}** target(s).".format(len(rows)));
+    lines.append("");
+    lines.append("- **Mean final kill rate:** {:.0%}".format(mean_final));
+    lines.append("- **Total tokens:** {:,}".format(total_tokens));
+    lines.append("");
+    lines.append("| function | file | baseline | final | mutants | tokens | details |");
+    lines.append("|---|---|---|---|---|---|---|");
+    for fn, fpath, base_kr, final_kr, mutants, tokens, slug in rows:
+        lines.append("| `{}` | `{}` | {:.0%} | {:.0%} | {} | {:,} | [report]({}/report.md) |".format(
+            fn, fpath, base_kr, final_kr, mutants, tokens, slug));
+    lines.append("");
+    index_path = os.path.join(out_dir, "report.md");
+    with open(index_path, "w") as handle:
+        handle.write("\n".join(lines));
+    return index_path
+
+
 def _read_jsonl(path: str) -> List[Dict[str, Any]]:
     entries = [];
     with open(path) as handle:
