@@ -221,7 +221,6 @@ def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
     head = pool[:60];  # cap the menu so the prompt stays small
     listing = "\n".join("{}. {}::{}".format(i, c["rel"], c["name"]) for i, c in enumerate(head));
     prompt = (
-<<<<<<< Updated upstream
         "You are choosing which functions in the repo `{}` are most worth hardening with\n"
         "adversarial mutation tests. Favor functions with real logic and edge cases — parsing,\n"
         "comparison, validation, math, encoding, security-relevant behavior. Rank trivial\n"
@@ -229,14 +228,6 @@ def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
         "<functions>\n{}\n</functions>\n\n"
         "Rank ALL of them. Return ONLY a JSON array of the item numbers, best first, "
         "e.g. [3, 0, 7]."
-=======
-        "You are choosing which functions in the repo `{}` are most worth hardening with "
-        "adversarial mutation tests. Favor functions with real logic and edge cases "
-        "(parsing, comparison, validation, math, encoding, security-relevant behavior); "
-        "rank trivial getters/wrappers/formatters last.\n\n"
-        "Eligible functions:\n{}\n\n"
-        "Return ONLY a JSON array of the item numbers, best first, e.g. [3, 0, 7]."
->>>>>>> Stashed changes
     ).format(repo, listing);
     order: List[int] = [];
     try:

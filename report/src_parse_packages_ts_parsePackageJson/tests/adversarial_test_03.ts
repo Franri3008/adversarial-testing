@@ -1,81 +1,31 @@
-import { parsePackageJson } from "./impl";
 import { test, expect } from "vitest";
+import { parsePackageJson } from "./impl";
 
-test("parsePackageJson handles valid package.json with dependencies and devDependencies", () => {
-  const input: any[] = [
-    {
-      path: "package.json",
-      content: JSON.stringify({
-        name: "test-package",
-        version: "1.0.0",
-        dependencies: {
-          lodash: "^4.17.21",
-          react: "^18.2.0",
-        },
-        devDependencies: {
-          typescript: "^5.0.0",
-          vitest: "^1.0.0",
-        },
-      }),
-    },
-  ];
+test("parsePackageJson targets path matching and devDeps guard bugs", () => {
+  // endswith_to_includes: a file whose path contains "package.json" but does not
+  // end with it should NOT be matched. With only this decoy file, no valid
+  // package.json is found, so it must throw.
+  expect(() =>
+    parsePackageJson([
+      { path: "package.json.bak", content: '{"dependencies":{}}' },
+    ] as any),
+  ).toThrow();
 
-  const result = parsePackageJson(input);
-
-  expect(result.dependencies).toEqual([
-    { name: "lodash", version: "^4.17.21" },
-    { name: "react", version: "^18.2.0" },
-  ]);
-  expect(result.devDependencies).toEqual([
-    { name: "typescript", version: "^5.0.0" },
-    { name: "vitest", version: "^1.0.0" },
-  ]);
-
-  // Test with path starting with slash
-  const inputWithSlash = [
+  // drop_devdeps_guard: devDependencies as a non-object (string) must not crash;
+  // it should simply yield empty devDependencies.
+  const result = parsePackageJson([
     {
       path: "/package.json",
       content: JSON.stringify({
-        dependencies: { axios: "^1.0.0" },
-        devDependencies: { jest: "^29.0.0" },
+        dependencies: { left: "1.0.0", right: "^2.3.4" },
+        devDependencies: "not-an-object",
       }),
     },
-  ];
+  ] as any);
 
-  const resultWithSlash = parsePackageJson(inputWithSlash);
-  expect(resultWithSlash.dependencies).toEqual([
-    { name: "axios", version: "^1.0.0" },
+  expect(result.dependencies).toEqual([
+    { name: "left", version: "1.0.0" },
+    { name: "right", version: "^2.3.4" },
   ]);
-  expect(resultWithSlash.devDependencies).toEqual([
-    { name: "jest", version: "^29.0.0" },
-  ]);
-
-  // Test with nested package.json
-  const inputNested = [
-    {
-      path: "src/package.json",
-      content: JSON.stringify({
-        dependencies: { moment: "^2.29.4" },
-      }),
-    },
-  ];
-
-  const resultNested = parsePackageJson(inputNested);
-  expect(resultNested.dependencies).toEqual([
-    { name: "moment", version: "^2.29.4" },
-  ]);
-  expect(resultNested.devDependencies).toEqual([]);
-
-  // Test with missing package.json
-  expect(() => parsePackageJson([])).toThrow();
-  expect(() => parsePackageJson([{ path: "other.json", content: "{}" }])).toThrow();
-
-  // Test with malformed JSON
-  const malformedInput = [
-    {
-      path: "package.json",
-      content: "{ invalid json }",
-    },
-  ];
-  expect(() => parsePackageJson(malformedInput)).toThrow();
+  expect(result.devDependencies).toEqual([]);
 });

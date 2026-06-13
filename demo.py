@@ -502,6 +502,22 @@ class Screen:
             sys.stdout.flush()
             self._primed = True
 
+    def hold(self):
+        """Keep the final frame up until the user quits.
+
+        In live mode the arena draws on the alt-screen buffer, which __exit__ tears down
+        the instant the `with` block ends — so without this the demo appears to close
+        itself the moment it finishes. The footer already says 'Ctrl-C to quit', so we
+        wait for exactly that. No-op for snapshot/non-tty output, which persists anyway.
+        """
+        if not self.live:
+            return
+        try:
+            while True:
+                time.sleep(0.25)
+        except KeyboardInterrupt:
+            pass
+
 SIM_TESTS = [
     ("M1_no_sort",
      "def test_unsorted_input_merges(merge_intervals):\n"
@@ -779,8 +795,7 @@ def run(opts):
         st["done"] = True
         st["events"].append(("done", "final kill_rate={:.0%} over {} mutants  /  {:,} tokens".format(st["kill_rate"], total, st["tokens"])))
         screen.commit(st)
-        if screen.live:
-            time.sleep(0.4)
+        screen.hold()
 
     import report
     meta = {
@@ -910,6 +925,7 @@ def replay(opts):
                     time.sleep(min(0.18, opts.delay))
                     rebuild_panel()
                 time.sleep(opts.delay)
+        screen.hold()
 
 
 def _load_run(path):
@@ -1009,8 +1025,7 @@ def replay_repo(opts, log_paths):
         st["events"].append(("done", "repo sweep complete — {} bugs caught across {} functions / {:,} tokens".format(
             st["killed"], len(functions), st["tokens"])))
         screen.commit(st)
-        if screen.live:
-            time.sleep(0.5)
+        screen.hold()
 
 
 SPEEDS = {"slow": 1.1, "normal": 0.6, "fast": 0.25}

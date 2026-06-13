@@ -271,9 +271,26 @@ def harden_target(reference_src, mutants, language, function_name, test_import_p
 
 
 def _run_repo_scan(kwargs: Dict[str, str]) -> None:
-    """repo= given without function= -> discover every self-contained function and harden each."""
+    """repo= given without function= -> discover every eligible function and harden each."""
     import discover
+    import glob
     import report
+    import shutil
+
+    # Fresh run: clear prior scan artifacts first. main.py overwrites the run_0N slots it
+    # writes this run, but stale higher-numbered logs / report subdirs from a previous
+    # (larger or different) repo would otherwise survive and pollute `demo.py --replay`,
+    # which globs every run_*.jsonl. Wiping up front keeps "throw it at a repo, get this
+    # repo's output" true without manual hygiene.
+    stale_logs = glob.glob("run_*.jsonl")
+    for stale in stale_logs:
+        os.remove(stale)
+    had_report = os.path.isdir("report")
+    if had_report:
+        shutil.rmtree("report")
+    if stale_logs or had_report:
+        print("[scan] cleared {} stale log(s){} from a previous run".format(
+            len(stale_logs), " + report/" if had_report else ""))
 
     n = int(kwargs.get("mutants", "5"))
     max_targets = int(kwargs.get("max_targets", "0"))

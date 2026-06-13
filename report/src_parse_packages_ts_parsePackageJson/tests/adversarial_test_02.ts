@@ -1,53 +1,49 @@
 import { parsePackageJson } from "./impl";
 import { test, expect } from "vitest";
 
-test("parsePackageJson adversarial", () => {
-  // r1_missing_throws_on_empty: must throw when no package.json found
-  expect(() => parsePackageJson([])).toThrow();
-  expect(() =>
-    parsePackageJson([{ path: "src/index.ts", content: "{}" }] as any),
-  ).toThrow();
+test("parsePackageJson handles path matching, version type validation, and devDependencies type guard", () => {
+  // Bug 1: endswith_to_includes - should not match "my-package.json"
+  const inputPathMatch = [
+    { path: "my-package.json", content: '{"dependencies": {"wrong": "1.0.0"}}' },
+    { path: "package.json", content: '{"dependencies": {"correct": "2.0.0"}}' },
+  ];
+  const resultPath = parsePackageJson(inputPathMatch);
+  expect(resultPath.dependencies).toEqual([{ name: "correct", version: "2.0.0" }]);
+  expect(resultPath.devDependencies).toEqual([]);
 
-  // r1_first_match_uses_last: first matching package.json should be preferred
-  const multi = parsePackageJson([
-    {
-      path: "package.json",
-      content: JSON.stringify({ dependencies: { first: "1.0.0" } }),
-    },
-    {
-      path: "nested/package.json",
-      content: JSON.stringify({ dependencies: { second: "2.0.0" } }),
-    },
-  ] as any);
-  expect(multi.dependencies).toEqual([{ name: "first", version: "1.0.0" }]);
-  expect(multi.dependencies.find((d) => d.name === "second")).toBeUndefined();
-
-  // r1_empty_string_version_skipped: empty string version must be included
-  const result = parsePackageJson([
+  // Bug 2: flip_version_type_check - non-string versions should be skipped
+  const inputNonStringVersion = [
     {
       path: "package.json",
       content: JSON.stringify({
-        dependencies: { empty: "", normal: "1.2.3", numeric: 5 },
-        devDependencies: { devEmpty: "", devNormal: "4.5.6" },
+        dependencies: {
+          "valid-string": "1.0.0",
+          "invalid-number": 2,
+          "invalid-object": { major: 1 },
+          "invalid-boolean": true,
+        },
       }),
     },
-  ] as any);
+  ];
+  const resultVersion = parsePackageJson(inputNonStringVersion);
+  expect(resultVersion.dependencies).toEqual([{ name: "valid-string", version: "1.0.0" }]);
 
-  expect(result.dependencies).toContainEqual({ name: "empty", version: "" });
-  expect(result.dependencies).toContainEqual({
-    name: "normal",
-    version: "1.2.3",
-  });
-  expect(result.dependencies.find((d) => d.name === "numeric")).toBeUndefined();
-  expect(result.dependencies).toHaveLength(2);
+  // Bug 3: drop_devdeps_guard - devDependencies as truthy non-object (boolean) should not crash
+  const inputInvalidDevDeps = [
+    {
+      path: "package.json",
+      content: JSON.stringify({
+        dependencies: { "prod-dep": "1.0.0" },
+        devDependencies: true,
+      }),
+    },
+  ];
+  const resultDevDeps = parsePackageJson(inputInvalidDevDeps);
+  expect(resultDevDeps.dependencies).toEqual([{ name: "prod-dep", version: "1.0.0" }]);
+  expect(resultDevDeps.devDependencies).toEqual([]);
 
-  expect(result.devDependencies).toContainEqual({
-    name: "devEmpty",
-    version: "",
-  });
-  expect(result.devDependencies).toContainEqual({
-    name: "devNormal",
-    version: "4.5.6",
-  });
-  expect(result.devDependencies).toHaveLength(2);
+  // Missing package.json should throw
+  expect(() => parsePackageJson([{ path: "other.json", content: "{}" }])).toThrow(
+    "no package.json found",
+  );
 });

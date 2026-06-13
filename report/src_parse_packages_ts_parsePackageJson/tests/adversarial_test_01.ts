@@ -1,62 +1,58 @@
 import { parsePackageJson } from "./impl";
 import { test, expect } from "vitest";
 
-test("parsePackageJson handles deps, devDeps, types, and nested paths", () => {
-  const packageJson = {
-    dependencies: {
-      react: "^18.0.0",
-      lodash: "^4.0.0",
-      badVersion: 123, // non-string, must be skipped
-    },
-    devDependencies: {
-      vitest: "^1.0.0",
-      typescript: "^5.0.0",
-    },
-  };
+test("parsePackageJson handles edge cases and catches target bugs", () => {
+  // Bug: endswith_to_includes - should not match package.json.backup or package.json.old
+  const inputWithSimilarNames = [
+    { path: "package.json", content: JSON.stringify({ dependencies: { "main": "1.0.0" } }) },
+    { path: "package.json.backup", content: JSON.stringify({ dependencies: { "backup": "2.0.0" } }) },
+    { path: "src/package.json.old", content: JSON.stringify({ dependencies: { "old": "3.0.0" } }) },
+  ];
+  const result1 = parsePackageJson(inputWithSimilarNames);
+  expect(result1.dependencies).toEqual([{ name: "main", version: "1.0.0" }]);
+  expect(result1.devDependencies).toEqual([]);
 
-  // wrong_path_match: nested path requires endsWith, not startsWith
-  const result = parsePackageJson([
-    { path: "some/nested/dir/package.json", content: JSON.stringify(packageJson) },
-  ]);
+  // Bug: flip_version_type_check - should only include string versions
+  const inputWithNonStringVersions = [
+    { path: "package.json", content: JSON.stringify({
+      dependencies: {
+        "string-dep": "1.0.0",
+        "number-dep": 2,
+        "object-dep": { version: "3.0.0" },
+        "null-dep": null,
+        "array-dep": ["1.0.0"]
+      }
+    })},
+  ];
+  const result2 = parsePackageJson(inputWithNonStringVersions);
+  expect(result2.dependencies).toEqual([{ name: "string-dep", version: "1.0.0" }]);
 
-  // dep_guard_or + flip_type_check: only string versions in dependencies
-  expect(result.dependencies).toHaveLength(2);
-  expect(result.dependencies).toContainEqual({ name: "react", version: "^18.0.0" });
-  expect(result.dependencies).toContainEqual({ name: "lodash", version: "^4.0.0" });
-  // badVersion (non-string) must NOT be present
-  expect(result.dependencies.some((d) => d.name === "badVersion")).toBe(false);
+  // Bug: drop_devdeps_guard - should not crash on null devDependencies
+  const inputWithNullDevDeps = [
+    { path: "package.json", content: JSON.stringify({
+      dependencies: { "dep1": "1.0.0" },
+      devDependencies: null
+    })},
+  ];
+  const result3 = parsePackageJson(inputWithNullDevDeps);
+  expect(result3.dependencies).toEqual([{ name: "dep1", version: "1.0.0" }]);
+  expect(result3.devDependencies).toEqual([]);
 
-  // swap_deps_dev: devDeps must go to devDependencies, not dependencies
-  expect(result.devDependencies).toHaveLength(2);
-  expect(result.devDependencies).toContainEqual({ name: "vitest", version: "^1.0.0" });
-  expect(result.devDependencies).toContainEqual({ name: "typescript", version: "^5.0.0" });
-  // dependencies must not contain devDeps
-  expect(result.dependencies.some((d) => d.name === "vitest")).toBe(false);
-  expect(result.dependencies.some((d) => d.name === "typescript")).toBe(false);
+  // Bug: swap_dep_targets - should keep dependencies and devDependencies separate
+  const inputWithBoth = [
+    { path: "package.json", content: JSON.stringify({
+      dependencies: { "prod": "1.0.0" },
+      devDependencies: { "dev": "2.0.0" }
+    })},
+  ];
+  const result4 = parsePackageJson(inputWithBoth);
+  expect(result4.dependencies).toEqual([{ name: "prod", version: "1.0.0" }]);
+  expect(result4.devDependencies).toEqual([{ name: "dev", version: "2.0.0" }]);
 
-  // drop_dev_guard: non-object devDependencies must not crash, yields empty
-  const result2 = parsePackageJson([
-    {
-      path: "package.json",
-      content: JSON.stringify({
-        dependencies: { foo: "1.0.0" },
-        devDependencies: "not-an-object",
-      }),
-    },
-  ]);
-  expect(result2.dependencies).toEqual([{ name: "foo", version: "1.0.0" }]);
-  expect(result2.devDependencies).toEqual([]);
-
-  // dep_guard_or: non-object dependencies must not crash, yields empty
-  const result3 = parsePackageJson([
-    {
-      path: "/package.json",
-      content: JSON.stringify({
-        dependencies: "not-an-object",
-        devDependencies: { bar: "2.0.0" },
-      }),
-    },
-  ]);
-  expect(result3.dependencies).toEqual([]);
-  expect(result3.devDependencies).toEqual([{ name: "bar", version: "2.0.0" }]);
+  // Bug: wrong_not_found_default - should throw when package.json missing
+  const inputWithoutPackageJson = [
+    { path: "tsconfig.json", content: "{}" },
+    { path: "src/index.ts", content: "console.log('hi')" },
+  ];
+  expect(() => parsePackageJson(inputWithoutPackageJson)).toThrow("no package.json found in input files");
 });
