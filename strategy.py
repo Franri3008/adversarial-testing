@@ -11,18 +11,23 @@ def _build_prompt(observation: Dict[str, Any]) -> str:
     fixed_text = "\n".join("- {}".format(item) for item in fixed) if fixed else "(none yet)";
     failed_text = "\n".join("- {}".format(item) for item in failed) if failed else "(none yet)";
     return (
-        "You are the bug-finding strategist in an automatic repair loop.\n"
-        "Inspect the current source and identify ONE concrete, real defect that is still present.\n"
-        "Do not repeat any bug listed as already fixed or already attempted.\n"
-        "If you are confident the code is correct, report that no bug remains.\n"
-        "Return only valid JSON with this exact shape:\n"
-        "{\"bug_found\":true,\"description\":\"what is wrong and the correct behavior\",\"target_name\":\"function name\",\"should_continue\":true}\n\n"
-        "Already fixed:\n"
+        "You are the bug-finding strategist in an automatic repair loop. Inspect the source\n"
+        "and identify ONE concrete, still-present defect: a case where the code returns the\n"
+        "wrong result, crashes, or mishandles an input it is meant to handle. Only behavior\n"
+        "bugs count — ignore style, naming, and performance.\n\n"
+        "Do not repeat anything listed below as already fixed or already attempted.\n"
+        "If you are confident no real defect remains, report that instead of inventing one.\n\n"
+        "Return ONLY valid JSON, no prose, in exactly one of these two shapes:\n"
+        "  {\"bug_found\":true,\"description\":\"what is wrong AND the correct behavior\",\"target_name\":\"function name\",\"should_continue\":true}\n"
+        "  {\"bug_found\":false,\"description\":\"\",\"target_name\":\"\",\"should_continue\":false}\n"
+        "`should_continue` means: is it worth looking for further bugs after this one?\n\n"
+        "<already_fixed>\n"
         + fixed_text
-        + "\n\nAlready attempted without success:\n"
+        + "\n</already_fixed>\n\n<already_attempted>\n"
         + failed_text
-        + "\n\nCurrent source:\n"
+        + "\n</already_attempted>\n\n<source>\n"
         + code
+        + "\n</source>"
     )
 
 

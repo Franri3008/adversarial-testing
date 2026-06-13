@@ -12,14 +12,16 @@ def _function_name(src: str) -> str:
 
 def _build_bug_test_prompt(code: str, bug: Dict[str, Any], fn: str) -> str:
     return (
-        "You are writing one pytest test that exposes a known bug for an automatic repair loop.\n"
-        "The function under test is `{fn}` and is provided as a pytest FIXTURE, so your test "
-        "MUST take `{fn}` as a parameter and call it (do not import or redefine it).\n"
-        "Encode the CORRECT expected behavior, so the test FAILS on the current buggy code and "
-        "PASSES once the bug is fixed.\n\n"
-        "Bug: {bug}\n\n"
-        "Current (buggy) source for context:\n"
-        "```python\n{code}\n```\n\n"
+        "You are writing ONE pytest test that pins down the CORRECT behavior a known bug\n"
+        "violates, for an automatic repair loop.\n\n"
+        "Rules (hard requirements):\n"
+        "- `{fn}` is supplied as a pytest FIXTURE. Your test MUST take `{fn}` as a parameter\n"
+        "  and call it. NEVER import or redefine it.\n"
+        "- Assert the CORRECT expected behavior, NEVER the current buggy behavior. The test\n"
+        "  must FAIL on the buggy source below and PASS once the bug is fixed.\n"
+        "- Choose inputs that actually trigger the bug.\n\n"
+        "<bug>\n{bug}\n</bug>\n\n"
+        "<buggy_source language=\"python\">\n{code}\n</buggy_source>\n\n"
         "Output ONLY the test code in a single ```python code block. No prose."
     ).format(fn=fn, bug=bug.get("description", ""), code=code)
 
