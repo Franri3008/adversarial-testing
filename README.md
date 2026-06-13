@@ -136,10 +136,16 @@ final kill_rate=1.000 over 5 mutants, cost=$0.0346, log at run.jsonl
 
 | Arg | Meaning |
 |-----|---------|
-| `repo=` | repo URL (`https://github.com/owner/name`) or `owner/name` |
-| `file=` | path to the source file within the repo |
+| `repo=` | a **local checkout path** (read from disk, no network), a repo URL (`https://github.com/owner/name`), or `owner/name` |
+| `file=` | path to the source file (within the repo / checkout) |
 | `function=` | the function under test |
 | `mutants=` | how many mutants to generate (default 5) |
+
+Already have the repo cloned? Point `repo=` at it to skip the fetch entirely:
+
+```bash
+python3 main.py repo=~/Codes/NemoClaw file=src/lib/domain/duration.ts function=parseDuration
+```
 
 Language is inferred from the file extension (`.ts`/`.tsx` → vitest, `.py` → pytest).
 Requires the `gh` CLI authenticated; for TypeScript, install the harness once
