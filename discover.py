@@ -10,6 +10,7 @@ Returns fixture-shaped targets the existing loop already understands, one per fu
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,7 @@ from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import acquire
+import llm
 
 SUPPORTED = {".py", ".ts", ".tsx"}
 SKIP_DIRS = {"node_modules", "dist", "build", "out", "__pycache__", ".venv", "venv",
@@ -181,6 +183,51 @@ def _complexity(span: str) -> int:
     return len(body_lines) + 2 * len(BRANCH.findall(span))
 
 
+def _llm_rank(repo: str, candidates: List[dict], verbose: bool) -> List[dict]:
+    """Let the strategy model order the eligible functions — the agent picks what to harden.
+
+    The complexity score is only a pre-filter (cap the menu) and the fallback when no LLM is
+    reachable. The actual choice is the model's: it favors functions with real logic / edge
+    cases and sinks trivial wrappers, which is what the heuristic could not judge.
+    """
+    pool = sorted(candidates, key=lambda c: c["score"], reverse=True);
+    head = pool[:60];  # cap the menu so the prompt stays small
+    listing = "\n".join("{}. {}::{}".format(i, c["rel"], c["name"]) for i, c in enumerate(head));
+    prompt = (
+        "You are choosing which functions in the repo `{}` are most worth hardening with "
+        "adversarial mutation tests. Favor functions with real logic and edge cases "
+        "(parsing, comparison, validation, math, encoding, security-relevant behavior); "
+        "rank trivial getters/wrappers/formatters last.\n\n"
+        "Eligible self-contained functions:\n{}\n\n"
+        "Return ONLY a JSON array of the item numbers, best first, e.g. [3, 0, 7]."
+    ).format(repo, listing);
+    order: List[int] = [];
+    try:
+        text = llm.complete(prompt, role="strategy").get("text", "");
+        m = re.search(r"\[[\d,\s]*\]", text);
+        if m:
+            order = [int(x) for x in json.loads(m.group(0))];
+    except Exception:
+        order = [];
+    if not order:
+        _log(verbose, "LLM ranking unavailable -> falling back to complexity score");
+        return pool
+
+    seen = set();
+    ranked = [];
+    for idx in order:
+        if 0 <= idx < len(head) and idx not in seen:
+            seen.add(idx);
+            ranked.append(head[idx]);
+    for i, c in enumerate(head):  # any the model omitted, in complexity order
+        if i not in seen:
+            ranked.append(c);
+    ranked.extend(pool[60:]);
+    if ranked:
+        _log(verbose, "LLM ranked targets; top pick {}::{}".format(ranked[0]["rel"], ranked[0]["name"]));
+    return ranked
+
+
 def discover_targets(
     repo: str,
     mutants_per: int = 5,
@@ -225,8 +272,8 @@ def discover_targets(
                     "rel": rel, "src": src, "language": language, "name": name,
                     "score": _complexity(_function_span(src, name, language)),
                 });
-        candidates.sort(key=lambda c: c["score"], reverse=True);
-        _log(verbose, "{} eligible function(s); ranking by complexity".format(len(candidates)));
+        candidates = _llm_rank(repo, candidates, verbose);
+        _log(verbose, "{} eligible function(s); ranked by the strategy model".format(len(candidates)));
 
         # Pass 2: generate mutants best-first, stopping at max_targets.
         planned = min(max_targets, len(candidates)) if max_targets else len(candidates);
