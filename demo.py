@@ -264,8 +264,10 @@ def telemetry_cells(st, panel_w):
             c.text("  " + sp, ORANGE)
 
     row("tokens", tok)
-    row("strategy", lambda c: c.text(trunc(st["strategy_model"], inner - LBL), CYAN))
-    row("bulk", lambda c: c.text(trunc(st["bulk_model"], inner - LBL), PURPLE))
+    # The two-tier story, made explicit for the judges: who invents the bugs vs. who
+    # writes the tests. Show the bare model name (drop the provider prefix).
+    row("adversary", lambda c: c.text(trunc(st["strategy_model"].split("/")[-1], inner - LBL), CYAN, bold=True))
+    row("defender", lambda c: c.text(trunc(st["bulk_model"].split("/")[-1], inner - LBL), PURPLE, bold=True))
 
     def status(c):
         if st.get("plateau"):
@@ -444,7 +446,8 @@ def run(opts):
     import llm
     from generator import generate_test
     from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
-    from main import _get_runner, resolve_target
+    import adversary
+    from main import MUTANT_ROUNDS, MUTANTS_PER_ROUND, _get_runner, resolve_target
 
     if not opts.live:
         llm.complete = make_sim_complete(llm)
@@ -541,6 +544,8 @@ def run(opts):
         killed_total = set()
         kill_rates = []
         suite_sources = []
+        existing_ids = set(m["id"] for m in MUTANTS)
+        mutant_round = 0
 
         for iteration in range(1, opts.max_iter + 1):
             st["iteration"] = iteration
@@ -592,9 +597,50 @@ def run(opts):
             if screen.live:
                 time.sleep(delay)
 
+            # WAVE CLEARED: suite kills every current mutant -> the adversary invents new
+            # bugs the suite misses. The mutant board GROWS and the kill rate dips, then
+            # the defender climbs back. This is the co-evolution arms race on screen.
+            if not surviving:
+                if mutant_round >= MUTANT_ROUNDS:
+                    st["plateau"] = True
+                    st["events"].append(("done", "all waves cleared within budget ({} rounds)".format(MUTANT_ROUNDS)))
+                    screen.commit(st)
+                    break
+                mutant_round += 1
+                adv = spin_during(
+                    "adversary inventing bugs the suite misses (round {})".format(mutant_round),
+                    lambda: adversary.generate_surviving_mutants(
+                        REFERENCE_SRC, function_name, language, suite_sources, run_and_check,
+                        n=MUTANTS_PER_ROUND, existing_ids=existing_ids, round_idx=mutant_round, role="strategy"),
+                )
+                st["tokens"] += adv["tokens"]
+                st["token_history"].append(adv["tokens"])
+                if not adv["mutants"]:
+                    st["plateau"] = True
+                    st["events"].append(("done", "adversary defeated at round {} — suite is robust".format(mutant_round)))
+                    screen.commit(st)
+                    break
+                for m in adv["mutants"]:
+                    panel = {"id": m["id"], "desc": m.get("description", ""), "status": "alive", "flash": True}
+                    st["mutants"].append(panel)
+                    by_id[m["id"]] = panel
+                surviving = list(adv["mutants"])
+                total += len(adv["mutants"])
+                st["total"] = total
+                kill_rates = []
+                st["kill_rate"] = compute_kill_rate(len(killed_total), total)
+                st["kill_series"].append(st["kill_rate"])
+                st["events"].append(("warn", "adversary round {}: +{} new bugs the suite missed".format(mutant_round, len(adv["mutants"]))))
+                screen.commit(st)
+                if screen.live:
+                    time.sleep(max(delay, 0.5))
+                    for m in adv["mutants"]:
+                        by_id[m["id"]]["flash"] = False
+                continue
+
             if is_plateau(kill_rates):
                 st["plateau"] = True
-                st["events"].append(("done", "plateau detected at iter {} — converged".format(iteration)))
+                st["events"].append(("done", "plateau detected at iter {} — defender can't break it".format(iteration)))
                 screen.commit(st)
                 break
 
@@ -614,6 +660,8 @@ def run(opts):
         "bulk_model": st["bulk_model"],
         "total_mutants": total,
         "surviving": surviving,
+        "mutant_rounds": mutant_round,
+        "killed_total": len(killed_total),
     }
     report_path = report.write_report(meta, logger.entries, suite_sources, baseline=baseline);
     st["events"].append(("done", "report written to {}".format(report_path)));
