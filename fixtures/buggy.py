@@ -30,6 +30,12 @@ _FIX_AFTER_B2 = '''def grade(score, total):
     return round(ratio * 100, 2)
 '''
 
+# What a single all-at-once "fix every defect" attempt realistically produces on this
+# target: the obvious ZeroDivisionError crash gets guarded, but the two subtler boundary
+# clamps are missed. This is the one-shot baseline the iterative loop is measured against —
+# the loop's per-bug write-test-verify cycle is what closes the remaining two defects.
+ONESHOT_SRC = _FIX_AFTER_B1
+
 PLANTED_BUGS = [
     {
         "id": "B1_zero_total",

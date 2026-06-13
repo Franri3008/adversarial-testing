@@ -5,7 +5,7 @@ os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1");
 import json
 from typing import Any, Dict, List
 
-from fixtures.buggy import BUGGY_SRC, PLANTED_BUGS, REFERENCE_SRC
+from fixtures.buggy import BUGGY_SRC, ONESHOT_SRC, PLANTED_BUGS, REFERENCE_SRC
 from generator import generate_test
 from harness import JsonlLogger, is_plateau
 import repair_main as repair
@@ -64,7 +64,7 @@ def main() -> None:
     logger = JsonlLogger(LOG_PATH);
 
     print("=== PHASE 1: REPAIR (find & fix real bugs) ===");
-    repaired = repair.run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS, verbose=True);
+    repaired = repair.run_repair(BUGGY_SRC, REFERENCE_SRC, PLANTED_BUGS, verbose=True, oneshot_src=ONESHOT_SRC);
     for entry in repaired["entries"]:
         merged = dict(entry);
         merged["phase"] = "repair";
