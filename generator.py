@@ -20,39 +20,44 @@ def _clues(surviving: List[Dict[str, Any]]) -> str:
     return "\n".join("- {}: {}".format(m["id"], m.get("description", "")) for m in surviving)
 
 
-def _build_prompt_python(reference_src: str, fn: str, surviving: List[Dict[str, Any]]) -> str:
-    return (
+# Prompt structure for caching: the stable parts (instructions + reference src) go
+# into `prefix`, which is sent as a cache_control block. Only `suffix` (the surviving
+# mutant clues) changes between iterations, so iterations 2..N get a cache hit.
+def _prompt_python(reference_src: str, fn: str, surviving: List[Dict[str, Any]]):
+    prefix = (
         "You are writing an adversarial pytest test for mutation testing.\n"
         "The function under test is `{fn}` and is provided as a pytest FIXTURE, so your "
         "test MUST take `{fn}` as a parameter and call it (do not import or redefine it).\n\n"
-        "Write ONE test function with several assertions that PASS on the correct "
-        "implementation but would FAIL on implementations exhibiting these bugs:\n"
-        "{clues}\n\n"
         "Correct reference implementation (for behavior, do not copy into the test):\n"
         "```python\n{ref}\n```\n\n"
+        "Write ONE test function with several assertions that PASS on the correct "
+        "implementation but would FAIL on implementations exhibiting the bugs listed below.\n"
         "Output ONLY the test code in a single ```python code block. No prose."
-    ).format(fn=fn, clues=_clues(surviving), ref=reference_src)
+    ).format(fn=fn, ref=reference_src)
+    suffix = "Surviving bugs to target:\n{clues}".format(clues=_clues(surviving))
+    return prefix, suffix
 
 
-def _build_prompt_typescript(
+def _prompt_typescript(
     reference_src: str,
     fn: str,
     surviving: List[Dict[str, Any]],
     import_path: str = "./impl",
-) -> str:
-    return (
+):
+    prefix = (
         "You are writing an adversarial vitest test (TypeScript) for mutation testing.\n"
         "Import the function under test with `import {{ {fn} }} from \"{import_path}\";` and import "
         "`test` and `expect` from \"vitest\". Do not redefine the function.\n\n"
-        "Write ONE test with several assertions that PASS on the correct implementation but "
-        "would FAIL on implementations exhibiting these bugs:\n"
-        "{clues}\n\n"
-        "For inputs that must be rejected, assert it throws: "
-        "`expect(() => {fn}(x)).toThrow();`\n\n"
         "Correct reference implementation (for behavior, do not copy into the test):\n"
         "```typescript\n{ref}\n```\n\n"
+        "Write ONE test with several assertions that PASS on the correct implementation but "
+        "would FAIL on implementations exhibiting the bugs listed below.\n"
+        "For inputs that must be rejected, assert it throws: "
+        "`expect(() => {fn}(x)).toThrow();`\n\n"
         "Output ONLY the test code in a single ```typescript code block. No prose."
-    ).format(fn=fn, import_path=import_path, clues=_clues(surviving), ref=reference_src)
+    ).format(fn=fn, import_path=import_path, ref=reference_src)
+    suffix = "Surviving bugs to target:\n{clues}".format(clues=_clues(surviving))
+    return prefix, suffix
 
 
 def _extract_code(text: str) -> str:
@@ -71,14 +76,14 @@ def generate_test(
 ) -> Dict[str, Any]:
     if language == "typescript":
         fn = _ts_function_name(reference_src, function_name)
-        prompt = _build_prompt_typescript(
+        prefix, suffix = _prompt_typescript(
             reference_src, fn, surviving_mutants, test_import_path or "./impl"
         )
     else:
         fn = function_name or _python_function_name(reference_src)
-        prompt = _build_prompt_python(reference_src, fn, surviving_mutants)
+        prefix, suffix = _prompt_python(reference_src, fn, surviving_mutants)
 
-    response = llm.complete(prompt, role=role)
+    response = llm.complete(suffix, role=role, cache_prefix=prefix)
     test_src = _extract_code(response["text"])
     return {
         "test_src": test_src,

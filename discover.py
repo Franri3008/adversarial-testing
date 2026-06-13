@@ -16,12 +16,16 @@ import re
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
 import acquire
 import llm
+
+# LLM mutant generation is HTTP-bound, so we can fan out wider than CPU count.
+DISCOVER_WORKERS = max(1, int(os.environ.get("DISCOVER_WORKERS", "8")))
 
 SUPPORTED = {".py", ".ts", ".tsx"}
 SKIP_DIRS = {"node_modules", "dist", "build", "out", "__pycache__", ".venv", "venv",
@@ -275,28 +279,46 @@ def discover_targets(
         candidates = _llm_rank(repo, candidates, verbose);
         _log(verbose, "{} eligible function(s); ranked by the strategy model".format(len(candidates)));
 
-        # Pass 2: generate mutants best-first, stopping at max_targets.
-        planned = min(max_targets, len(candidates)) if max_targets else len(candidates);
-        for i, c in enumerate(candidates):
-            if max_targets and len(targets) >= max_targets:
-                _log(verbose, "reached max_targets={} -> stopping".format(max_targets));
-                break
+        # Pass 2: generate mutants best-first, in parallel. We submit the top
+        # candidates needed to cover max_targets (with 2x slack for failures),
+        # then keep results in rank order. With max_targets=0 we run them all.
+        if max_targets:
+            planned = min(max_targets * 2, len(candidates));
+        else:
+            planned = len(candidates);
+        workers = min(DISCOVER_WORKERS, planned);
+        head = candidates[:planned];
+        _log(verbose, "generating mutants for {} candidate(s) with {} parallel worker(s)".format(
+            planned, workers));
+
+        def _gen(c):
             fn = "{}::{}".format(c["rel"], c["name"]);
-            _log(verbose, "[{}/{}] → generating {} mutants for {} (score {})  [LLM]…".format(
-                len(targets) + 1, planned, mutants_per, fn, c["score"]));
             started = time.perf_counter();
             try:
                 mutants = acquire.generate_mutants(c["src"], c["name"], c["language"], mutants_per);
+                dt = time.perf_counter() - started;
+                if not mutants:
+                    _log(verbose, "    ✗ {} (no valid mutants in {:.1f}s)".format(fn, dt));
+                    return None
+                _log(verbose, "    ✓ {}  {} mutants in {:.1f}s".format(fn, len(mutants), dt));
+                return acquire.Target(c["src"], mutants, c["language"], c["name"])
             except Exception as exc:
                 _log(verbose, "    ✗ {} skipped after {:.1f}s (mutant-gen failed: {})".format(
                     fn, time.perf_counter() - started, exc));
-                continue
-            if not mutants:
-                _log(verbose, "    ✗ {} skipped after {:.1f}s (no valid mutants)".format(
-                    fn, time.perf_counter() - started));
-                continue
-            targets.append((c["rel"], acquire.Target(c["src"], mutants, c["language"], c["name"])));
-            _log(verbose, "    ✓ {}  {} mutants in {:.1f}s".format(
-                fn, len(mutants), time.perf_counter() - started));
+                return None
+
+        by_rank: dict = {};
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_gen, c): i for i, c in enumerate(head)};
+            for fut in as_completed(futures):
+                rank = futures[fut];
+                target = fut.result();
+                if target is not None:
+                    by_rank[rank] = (head[rank]["rel"], target);
+
+        for rank in sorted(by_rank):
+            if max_targets and len(targets) >= max_targets:
+                break
+            targets.append(by_rank[rank]);
     _log(verbose, "{} target(s) with valid mutants".format(len(targets)));
     return targets
