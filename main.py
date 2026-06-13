@@ -1,9 +1,14 @@
 import os
 
-from fixtures import MUTANTS, REFERENCE_SRC
+from fixtures import LANGUAGE, MUTANTS, REFERENCE_SRC
 from generator import generate_test
 from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
-from runner import run_and_check
+
+# Verifier is selected by the fixture's language: Python -> pytest, TypeScript -> vitest.
+if LANGUAGE == "typescript":
+    from runner_ts import run_and_check
+else:
+    from runner import run_and_check
 
 MAX_ITERATIONS = int(os.environ.get("LOOPIFY_MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
