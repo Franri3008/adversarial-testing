@@ -217,10 +217,16 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Loopify runtime artifacts / local agent dir
+# Runtime artifacts / local agent dir
 run.jsonl
 repair_run.jsonl
 repair_baseline.json
 repair_curve.png
 orchestrate_run.jsonl
 .claude/
+
+# ts_harness: vitest installed locally + per-run scratch files (package.json is tracked)
+ts_harness/node_modules/
+ts_harness/impl.ts
+ts_harness/gen.test.ts
+ts_harness/demo.test.ts

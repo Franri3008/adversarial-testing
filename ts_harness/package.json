@@ -1,0 +1,9 @@
+{
+  "name": "ts-mutation-harness",
+  "private": true,
+  "type": "module",
+  "description": "Minimal standalone vitest project used by runner_ts.py to verify generated TS tests against reference/mutant implementations. Not part of the loop's package graph.",
+  "devDependencies": {
+    "vitest": "^2.1.0"
+  }
+}

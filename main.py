@@ -1,28 +1,87 @@
 import os
+import sys
+from typing import Dict, List, Optional
 
-from fixtures import MUTANTS, REFERENCE_SRC
 from generator import generate_test
 from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
-from runner import run_and_check
 
-MAX_ITERATIONS = int(os.environ.get("LOOPIFY_MAX_ITERATIONS", "25"))
+MAX_ITERATIONS = int(os.environ.get("MAX_ITERATIONS", "25"))
 LOG_PATH = "run.jsonl"
 
 # Two-tier stacked loop: start cheap (bulk), escalate to the smart model (strategy)
 # when the cheap tier stops making progress. Budget caps are the terminal stop.
 ROLE_ORDER = ["bulk", "strategy"]
-COST_CAP_USD = float(os.environ.get("LOOPIFY_COST_CAP", "5.0"))      # 0 disables
-TOKEN_CAP = int(os.environ.get("LOOPIFY_TOKEN_CAP", "0"))            # 0 disables
+COST_CAP_USD = float(os.environ.get("COST_CAP", "5.0"))      # 0 disables
+TOKEN_CAP = int(os.environ.get("TOKEN_CAP", "0"))            # 0 disables
+
+
+def _parse_kwargs(argv: List[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for arg in argv:
+        if "=" in arg:
+            key, _, value = arg.partition("=")
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _resolve_target():
+    """CLI mode (repo=/file=/function=) acquires a target from a real repo;
+    otherwise fall back to a built-in fixture (FIXTURE)."""
+    kwargs = _parse_kwargs(sys.argv[1:])
+    if kwargs.get("repo") or kwargs.get("file"):
+        from acquire import acquire_target
+
+        missing = [k for k in ("repo", "file", "function") if not kwargs.get(k)]
+        if missing:
+            raise SystemExit(f"CLI mode needs: repo=, file=, function= (missing: {missing})")
+        n = int(kwargs.get("mutants", "5"))
+        t = acquire_target(kwargs["repo"], kwargs["file"], kwargs["function"], n)
+        return t.reference_src, t.mutants, t.language, t.function_name, None, None
+
+    import fixtures
+
+    return (
+        fixtures.REFERENCE_SRC,
+        fixtures.MUTANTS,
+        fixtures.LANGUAGE,
+        fixtures.FUNCTION_NAME,
+        getattr(fixtures, "RUNNER", None),
+        getattr(fixtures, "TEST_IMPORT_PATH", None),
+    )
+
+
+def _get_runner(language: str, runner: Optional[str] = None):
+    if runner == "typescript_repo":
+        from runner_repo_ts import run_and_check
+    elif language == "typescript":
+        from runner_ts import run_and_check
+    else:
+        from runner import run_and_check
+    return run_and_check
 
 
 def main() -> None:
-    logger = JsonlLogger(LOG_PATH)
-    total = len(MUTANTS)
+    reference_src, mutants, language, function_name, runner, test_import_path = _resolve_target()
+    run_and_check = _get_runner(language, runner)
 
-    baseline = run_baseline(REFERENCE_SRC, MUTANTS, generate_test, run_and_check)
+    # Bind language/function so generation works for both fixture and CLI targets.
+    def gen_fn(ref, surviving, role="bulk"):
+        return generate_test(
+            ref,
+            surviving,
+            role=role,
+            language=language,
+            function_name=function_name,
+            test_import_path=test_import_path,
+        )
+
+    logger = JsonlLogger(LOG_PATH)
+    total = len(mutants)
+
+    baseline = run_baseline(reference_src, mutants, gen_fn, run_and_check)
     print("baseline kill_rate={:.3f} tokens={}".format(baseline["kill_rate"], baseline["cumulative_tokens"]))
 
-    surviving = list(MUTANTS)
+    surviving = list(mutants)
     killed_total = set()
     cumulative_tokens = 0
     cumulative_cost = 0.0
@@ -32,11 +91,11 @@ def main() -> None:
     print("iter  tier      cum_tokens   cost$    kill_rate  killed_this_round")
     for iteration in range(1, MAX_ITERATIONS + 1):
         role = ROLE_ORDER[role_idx]
-        gen = generate_test(REFERENCE_SRC, surviving, role=role)
+        gen = gen_fn(reference_src, surviving, role=role)
         cumulative_tokens += gen["tokens"]["in"] + gen["tokens"]["out"]
         cumulative_cost += gen.get("cost", 0.0)
 
-        result = run_and_check(gen["test_src"], REFERENCE_SRC, surviving)
+        result = run_and_check(gen["test_src"], reference_src, surviving)
         killed_this_round = result["killed_mutant_ids"] if result["reference_passed"] else []
         for mid in killed_this_round:
             killed_total.add(mid)
