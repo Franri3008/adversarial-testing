@@ -1,0 +1,7 @@
+{"iteration": 1, "cumulative_tokens": 558, "kill_rate": 0.4, "killed_this_round": ["M1_no_sort", "M4_drop_last"]}
+{"iteration": 2, "cumulative_tokens": 970, "kill_rate": 0.6, "killed_this_round": ["M2_strict_overlap"]}
+{"iteration": 3, "cumulative_tokens": 1519, "kill_rate": 0.8, "killed_this_round": ["M3_overwrite_end"]}
+{"iteration": 4, "cumulative_tokens": 1925, "kill_rate": 1.0, "killed_this_round": ["M5_empty_returns_none"]}
+{"iteration": 5, "cumulative_tokens": 2338, "kill_rate": 1.0, "killed_this_round": []}
+{"iteration": 6, "cumulative_tokens": 2850, "kill_rate": 1.0, "killed_this_round": []}
+{"iteration": 7, "cumulative_tokens": 3213, "kill_rate": 1.0, "killed_this_round": []}
