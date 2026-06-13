@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import json
 import shutil
 import sys
 import threading
@@ -447,7 +448,7 @@ def run(opts):
     from generator import generate_test
     from harness import JsonlLogger, compute_kill_rate, is_plateau, make_log_entry, run_baseline
     import adversary
-    from main import MUTANT_ROUNDS, MUTANTS_PER_ROUND, _get_runner, resolve_target
+    from main import MUTANT_ROUNDS, MUTANTS_PER_ROUND, ROLE_ORDER, _get_runner, resolve_target
 
     if not opts.live:
         llm.complete = make_sim_complete(llm)
@@ -546,13 +547,18 @@ def run(opts):
         suite_sources = []
         existing_ids = set(m["id"] for m in MUTANTS)
         mutant_round = 0
+        role_idx = 0
 
         for iteration in range(1, opts.max_iter + 1):
             st["iteration"] = iteration
 
+            role = ROLE_ORDER[role_idx]
+            st["tier"] = role
+            tier_name = "smart" if role == "strategy" else "fast"
+            active_model = st["strategy_model"] if role == "strategy" else st["bulk_model"]
             gen = spin_during(
-                "generating adversarial test ({})".format(st["bulk_model"].split("/")[-1]),
-                lambda: gen_fn(REFERENCE_SRC, surviving),
+                "defender writing a test — {} tier ({})".format(tier_name, active_model.split("/")[-1]),
+                lambda: gen_fn(REFERENCE_SRC, surviving, role=role),
             )
             delta = gen["tokens"]["in"] + gen["tokens"]["out"]
             st["tokens"] += delta
@@ -628,6 +634,7 @@ def run(opts):
                 total += len(adv["mutants"])
                 st["total"] = total
                 kill_rates = []
+                role_idx = 0          # fresh wave: start cheap again
                 st["kill_rate"] = compute_kill_rate(len(killed_total), total)
                 st["kill_series"].append(st["kill_rate"])
                 st["events"].append(("warn", "adversary round {}: +{} new bugs the suite missed".format(mutant_round, len(adv["mutants"]))))
@@ -639,8 +646,19 @@ def run(opts):
                 continue
 
             if is_plateau(kill_rates):
+                # Don't quit — escalate cheap->smart, then stop only if the strongest
+                # tier also stalls. This is the moment the curve jumps in the graph.
+                if role_idx + 1 < len(ROLE_ORDER):
+                    role_idx += 1
+                    kill_rates = []
+                    st["events"].append(("warn", "plateau on {} ({} surviving) -> escalating to {}".format(
+                        ROLE_ORDER[role_idx - 1], len(surviving), ROLE_ORDER[role_idx])))
+                    screen.commit(st)
+                    if screen.live:
+                        time.sleep(max(delay, 0.4))
+                    continue
                 st["plateau"] = True
-                st["events"].append(("done", "plateau detected at iter {} — defender can't break it".format(iteration)))
+                st["events"].append(("done", "plateau on strongest tier — {} mutant(s) unkilled".format(len(surviving))))
                 screen.commit(st)
                 break
 
